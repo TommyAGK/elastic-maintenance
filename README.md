@@ -17,3 +17,18 @@ It supports:
 - `internal/reconcile`: diff/apply planning
 - `deploy/kubernetes`: manifests for running the tool in-cluster
 
+## Test coverage
+
+The project includes both unit tests and integration-style tests.
+
+- Unit tests cover:
+  - desired-state config loading
+  - Kibana client request helpers and error handling
+  - CLI flag validation
+  - reconciliation planning and report formatting
+  - mock server request recording
+- Integration-style tests cover:
+  - review mode against the mock Kibana server
+  - apply mode against the mock Kibana server
+  - end-to-end request flow through the real client and reconciler
+

@@ -3,21 +3,33 @@ package kibana
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"elastic-maintenance/internal/config"
 )
+
+func normalize(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+func ruleKey(r config.Rule) string {
+	if k := normalize(r.RuleID); k != "" { return k }
+	return normalize(r.Name) + "|" + normalize(r.Type)
+}
+
+func policyKey(name, namespace string) string {
+	ns := namespace
+	if ns == "" { ns = "default" }
+	return normalize(name) + "|" + normalize(ns)
+}
 
 func (c *Client) ReviewIntegrations(items []config.Integration) ([]ReviewChange, error) {
 	ctx := context.Background()
 	existing, err := c.InstalledPackages(ctx)
 	if err != nil { return nil, err }
 	existingMap := map[string]InstalledPackage{}
-	for _, item := range existing {
-		existingMap[item.Name] = item
-	}
+	for _, item := range existing { existingMap[normalize(item.Name)] = item }
 	var out []ReviewChange
 	for _, item := range items {
-		cur, ok := existingMap[item.Name]
+		cur, ok := existingMap[normalize(item.Name)]
 		if !ok {
 			out = append(out, ReviewChange{Kind: "integration", Name: item.Name, Action: "install", Details: fmt.Sprintf("version=%s", item.Version)})
 			continue
@@ -34,12 +46,10 @@ func (c *Client) ReviewFleetPolicies(items []config.FleetPolicy) ([]ReviewChange
 	existing, err := c.PackagePolicies(ctx)
 	if err != nil { return nil, err }
 	existingMap := map[string]PackagePolicy{}
-	for _, item := range existing {
-		existingMap[item.Name] = item
-	}
+	for _, item := range existing { existingMap[policyKey(item.Name, item.Namespace)] = item }
 	var out []ReviewChange
 	for _, item := range items {
-		if _, ok := existingMap[item.Name]; !ok {
+		if _, ok := existingMap[policyKey(item.Name, "default")]; !ok {
 			out = append(out, ReviewChange{Kind: "fleet_policy", Name: item.Name, Action: "create"})
 		}
 	}
@@ -51,16 +61,13 @@ func (c *Client) ReviewRules(items []config.Rule) ([]ReviewChange, error) {
 	existing, err := c.Rules(ctx)
 	if err != nil { return nil, err }
 	existingMap := map[string]Rule{}
-	for _, item := range existing {
-		key := item.RuleID
-		if key == "" { key = item.Name }
-		existingMap[key] = item
-	}
+	for _, item := range existing { existingMap[normalize(item.RuleID)] = item }
 	var out []ReviewChange
 	for _, item := range items {
-		key := item.RuleID
-		if key == "" { key = item.Name }
-		cur, ok := existingMap[key]
+		cur, ok := existingMap[normalize(item.RuleID)]
+		if !ok && normalize(item.RuleID) == "" {
+			cur, ok = existingMap[normalize(item.Name)+"|"+normalize(item.Type)]
+		}
 		if !ok {
 			out = append(out, ReviewChange{Kind: "rule", Name: item.Name, Action: "create"})
 			continue
@@ -84,10 +91,20 @@ func (c *Client) EnsureIntegrations(items []config.Integration) (int, error) {
 
 func (c *Client) EnsureFleetPolicies(items []config.FleetPolicy) (int, error) {
 	ctx := context.Background()
+	existing, err := c.PackagePolicies(ctx)
+	if err != nil { return 0, err }
+	byName := map[string]PackagePolicy{}
+	for _, item := range existing { byName[policyKey(item.Name, item.Namespace)] = item }
 	planned := 0
 	for _, item := range items {
-		req := CreatePackagePolicyRequest{Name: item.Name, Namespace: "default"}
-		if err := c.postJSON(ctx, "/api/fleet/package_policies", req, nil); err != nil { return planned, err }
+		key := policyKey(item.Name, "default")
+		if cur, ok := byName[key]; ok {
+		req := UpdatePackagePolicyRequest{Name: item.Name, Namespace: "default"}
+			if err := c.putJSON(ctx, fmt.Sprintf("/api/fleet/package_policies/%s", cur.ID), req, nil); err != nil { return planned, err }
+		} else {
+			req := CreatePackagePolicyRequest{Name: item.Name, Namespace: "default"}
+			if err := c.postJSON(ctx, "/api/fleet/package_policies", req, nil); err != nil { return planned, err }
+		}
 		planned++
 	}
 	return planned, nil
@@ -95,12 +112,25 @@ func (c *Client) EnsureFleetPolicies(items []config.FleetPolicy) (int, error) {
 
 func (c *Client) EnsureRules(items []config.Rule) (int, error) {
 	ctx := context.Background()
+	existing, err := c.Rules(ctx)
+	if err != nil { return 0, err }
+	byKey := map[string]Rule{}
+	for _, item := range existing {
+		key := normalize(item.RuleID)
+		if key == "" { key = normalize(item.Name) + "|" + normalize(item.Type) }
+		byKey[key] = item
+	}
 	planned := 0
 	for _, item := range items {
+		key := ruleKey(item)
 		req := CreateRuleRequest{RuleID: item.RuleID, Name: item.Name, Type: item.Type, Enabled: item.Enabled, Query: item.Query, Severity: item.Severity, Interval: item.Interval, Language: item.Language, Index: item.Index}
-		path := "/api/detection_engine/rules"
-		if item.Prebuilt && item.RuleID != "" { path = fmt.Sprintf("/api/detection_engine/rules?rule_id=%s", item.RuleID) }
-		if err := c.postJSON(ctx, path, req, nil); err != nil { return planned, err }
+		if cur, ok := byKey[key]; ok {
+			if err := c.putJSON(ctx, fmt.Sprintf("/api/detection_engine/rules/%s", cur.ID), req, nil); err != nil { return planned, err }
+		} else {
+			path := "/api/detection_engine/rules"
+			if item.Prebuilt && item.RuleID != "" { path = fmt.Sprintf("/api/detection_engine/rules?rule_id=%s", item.RuleID) }
+			if err := c.postJSON(ctx, path, req, nil); err != nil { return planned, err }
+		}
 		planned++
 	}
 	return planned, nil

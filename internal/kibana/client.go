@@ -61,6 +61,11 @@ type CreatePackagePolicyRequest struct {
 	} `json:"package"`
 }
 
+type UpdatePackagePolicyRequest struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
 type CreateRuleRequest struct {
 	RuleID   string `json:"rule_id,omitempty"`
 	Name     string `json:"name"`
@@ -103,6 +108,18 @@ func (c *Client) getJSON(ctx context.Context, path string, v any) error {
 func (c *Client) postJSON(ctx context.Context, path string, body any, v any) error {
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(path), bytes.NewReader(b))
+	if err != nil { return err }
+	resp, err := c.do(ctx, req)
+	if err != nil { return err }
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 { return decodeErr(resp) }
+	if v != nil { return json.NewDecoder(resp.Body).Decode(v) }
+	return nil
+}
+
+func (c *Client) putJSON(ctx context.Context, path string, body any, v any) error {
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.endpoint(path), bytes.NewReader(b))
 	if err != nil { return err }
 	resp, err := c.do(ctx, req)
 	if err != nil { return err }
