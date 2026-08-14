@@ -52,10 +52,13 @@ func TestExecuteHelp(t *testing.T) {
 
 func TestExecuteRejectsOperatorCLIAndCredentialFlags(t *testing.T) {
 	for name, args := range map[string][]string{
-		"plan command":  {"plan"},
-		"apply command": {"apply"},
-		"API key flag":  {"--api-key", "sensitive-value"},
-		"mode flag":     {"--mode", "apply"},
+		"review command":  {"review"},
+		"plan command":    {"plan"},
+		"apply command":   {"apply"},
+		"API key flag":    {"--api-key", "sensitive-value"},
+		"Kibana URL flag": {"--kibana-url", "https://kibana.example.test"},
+		"mode flag":       {"--mode", "apply"},
+		"namespace flag":  {"--namespace", "default"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

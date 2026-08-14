@@ -10,6 +10,7 @@ Preserve the verified Kibana contract baseline while replacing the prototype CLI
 - `docs/kibana-api-contracts.md`
 - `testdata/contracts/kibana/v9.2.0/`
 - `testdata/contracts/kibana/v9.4.2/`
+- `docs/implementation/phase-0-retirement-inventory.md`
 
 ## Substeps
 
@@ -109,3 +110,7 @@ Use an in-memory/test listener for endpoint tests. The skeleton must not create 
 ## Phase gate
 
 The binary starts a safe API skeleton, health/readiness/OpenAPI/authz boundaries test, public Kibana fixtures remain valid, the old operator CLI is gone, and unfinished domain endpoints are explicit and side-effect free.
+
+## Completion evidence
+
+The Phase 0 gate passed on the implementation branch with full tests, server/API/auth race tests, vet, linker-injected build/version verification, all 62 Kibana contract fixtures, production dependency checks, graceful local startup/shutdown, health/readiness/OpenAPI/authentication smoke checks, no state-directory creation, and stale executable/delivery artifact checks.

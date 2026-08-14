@@ -96,6 +96,7 @@ func TestParseStartupOptionsDefaultsAndAllowlistedEnvironment(t *testing.T) {
 			"ELASTIC_MAINTAINER_STATE_DIR":  "/state",
 			"ELASTIC_MAINTAINER_PUBLIC_URL": "http://localhost:9000",
 			"KIBANA_API_KEY":                "must-not-be-read",
+			"KIBANA_URL":                    "https://must-not-be-read.example.test",
 		}
 		value, ok := values[key]
 		return value, ok
@@ -108,8 +109,8 @@ func TestParseStartupOptionsDefaultsAndAllowlistedEnvironment(t *testing.T) {
 	if options.ConfigPath != "/mounted/server.yaml" || options.ListenOverride != "127.0.0.1:9000" || options.StateDirOverride != "/state" || options.PublicURLOverride != "http://localhost:9000" {
 		t.Fatalf("options = %#v", options)
 	}
-	if queried["KIBANA_API_KEY"] {
-		t.Fatal("ParseStartupOptions queried a target credential environment variable")
+	if queried["KIBANA_API_KEY"] || queried["KIBANA_URL"] {
+		t.Fatal("ParseStartupOptions queried a retired target environment variable")
 	}
 }
 
@@ -137,9 +138,13 @@ func TestParseStartupOptionsFlagsOverrideEnvironment(t *testing.T) {
 
 func TestParseStartupOptionsRejectsOperatorCommandsAndUnknownFlags(t *testing.T) {
 	for name, args := range map[string][]string{
-		"subcommand": {"plan"},
-		"api key":    {"--api-key", "secret"},
-		"mode":       {"--mode", "apply"},
+		"review subcommand": {"review"},
+		"plan subcommand":   {"plan"},
+		"apply subcommand":  {"apply"},
+		"api key":           {"--api-key", "secret"},
+		"Kibana URL":        {"--kibana-url", "https://kibana.example.test"},
+		"mode":              {"--mode", "apply"},
+		"namespace":         {"--namespace", "default"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := ParseStartupOptions(args, emptyLookup)
