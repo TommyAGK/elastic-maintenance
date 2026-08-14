@@ -16,7 +16,7 @@ Recorded on the `feat/prototype-replacement-skeleton` branch before replacement 
 
 | Area | Current tracked path | Phase 0 disposition |
 | --- | --- | --- |
-| CLI | `cmd/elastic-maintenance/` | Replace with `cmd/elastic-maintainer/` |
+| CLI | `cmd/elastic-maintenance/` | Replace with the `cmd/elastic-maintainer/` API-server entry point; no operator CLI |
 | Desired-state model | `internal/config/` | Replace with strict target and manifest packages |
 | Kibana client | `internal/kibana/` | Replace after contract fixtures are established |
 | Reconciler | `internal/reconcile/` | Replace; do not preserve review/apply mode semantics |
@@ -35,5 +35,5 @@ The old product/module name appears in the Go module, internal imports, command 
 
 - Preserve Git history and the configured `origin` remote.
 - Do not track `start-web.sh` during steps 1–4.
-- Do not remove passing prototype code until the replacement command skeleton can build and its replacement tests exist.
+- Do not remove passing prototype code until the replacement API-server skeleton can build and its replacement tests exist.
 - Do not claim live Kibana compatibility from mock fixtures alone.

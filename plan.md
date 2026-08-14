@@ -1,103 +1,123 @@
-# elastic-maintainer v1 implementation plan
+# elastic-maintainer v1 web-first API plan
 
 ## 1. Decision record
 
-This plan replaces the existing prototype in place.
+This plan supersedes the earlier CLI-first design.
 
-- Rename the product and binary from `elastic-maintenance` to `elastic-maintainer`.
-- Replace the current JSON desired-state format and `--mode=review|apply` interface. There is no v1 compatibility layer or automatic migration for the prototype.
-- Keep container packaging and Kubernetes deployment because Kubernetes is a production execution environment for the CLI.
-- Treat `start-web.sh` and its Docker-managed Elastic/Kibana stack as local testing and demonstration tooling only.
-- After a partial apply, require the operator to generate a new plan explicitly. Saved plans are not resumable.
-- Do not add plan signing, HMACs, or a machine-local integrity key. Plans are trusted local artifacts. Apply still validates plan structure, current desired inputs, operation payloads, ownership authority, and live baselines, but it does not promise to detect arbitrary non-semantic edits to plan JSON.
-- Keep the existing Git remote and normal repository workflow. “Local-only” means that the application has no hosted control plane, telemetry, or automatic repository/network side effects; it does not mean removing the repository remote.
+- Build a long-running, web-first API service with an embedded browser UI.
+- Deploy production as a single-replica Kubernetes Deployment exposed through a TLS Ingress.
+- Remove the operator CLI. The binary starts the server directly and accepts only startup configuration/version flags.
+- Authenticate users and automation clients with application-level OIDC.
+- Authorize viewer, planner, applier, and administrator roles. A planner who also has apply permission may approve and apply their own plan.
+- Publish a versioned REST API and OpenAPI description for the embedded UI and external automation.
+- Persist non-secret application state as versioned JSON files on a PVC. V1 is deliberately single-replica and has no database.
+- Keep mounted Git/YAML files as the desired-state source of truth. The API/UI never edits authoritative resources.
+- Assign each Kibana target to one mounted resource set. External GitOps/orchestration may mount different branches or revisions as separate resource sets.
+- Let administrators upload Kibana API keys and CA trust certificates through the protected API/UI. The server writes them to owned Kubernetes Secrets and never stores them on the PVC.
+- Support CA trust certificates only in v1; do not support client-certificate/mTLS authentication to Kibana.
+- Keep Docker packaging for production and `start-web.sh` for local testing only.
+- After partial apply, require a new plan explicitly. Plans are not resumable.
+- Plans are trusted server-managed artifacts and are not signed. Clients cannot upload or edit plan files.
+- Preserve the existing Git remote and history. Do not push, publish, deploy, or merge without explicit approval.
 
-## 2. Goal and workflow
+## 2. Product goal and workflow
 
-Build a Go CLI with an optional loopback web interface that reconciles Git-defined Elastic configuration against multiple Kibana 9.x targets and spaces.
+Build a Go service that reconciles mounted, Git-defined Elastic configuration against multiple Kibana 9.x targets and spaces through a web-first operator workflow.
 
-The workflow is Terraform-like:
-
-1. Validate target configuration and YAML manifests.
-2. Read each selected target and generate a deterministic, non-secret saved plan.
-3. Review that plan through the CLI or local web interface.
-4. Apply only the operations in that plan after rechecking desired inputs, ownership authority, compatibility, and live baselines.
-5. Process targets independently and report partial success without rollback.
-6. Generate a new plan after any partial apply or rejected apply.
+1. An external orchestrator mounts one or more read-only resource sets, optionally from separate Git branches/revisions.
+2. Mounted server configuration assigns each named Kibana target to exactly one resource set and one Kubernetes Secret name.
+3. An administrator uploads or rotates the target API key and optional CA certificate. The service stores them in an owned Kubernetes Secret.
+4. The service validates mounted inputs and displays target/resource inventory.
+5. A planner requests an asynchronous plan through the API/UI.
+6. The service snapshots desired inputs, reads Kibana, and saves a reviewable non-secret plan on the PVC.
+7. An applier reviews and applies that saved plan through the API/UI.
+8. Before mutation, the service rechecks mounted desired inputs, credentials, version, inventory authority, and live baselines.
+9. Targets execute independently; reports preserve partial success without rollback.
+10. Any partial/rejected apply requires an explicit new plan.
 
 ## 3. Scope and non-goals
 
 ### In scope
 
 - Kibana stable releases `>=9.2.0,<10.0.0`.
-- Multiple named targets and Kibana spaces.
-- Integration packages, Fleet agent policies, Fleet package policies, custom detection rules, and the complete Elastic prebuilt-rule package.
-- CLI execution on a workstation, in a container, or as a Kubernetes Job.
-- An explicitly launched, loopback-only web interface for local operator use.
-- Local file-backed plans, apply reports, managed-resource inventory, and crash-recovery journals.
+- Multiple targets, spaces, mounted resource sets, and branch/revision separation managed outside the service.
+- Integration packages, Fleet agent policies, Fleet package policies, custom detection rules, and collective Elastic prebuilt rules.
+- OIDC browser login and OAuth2/OIDC bearer-token API access.
+- Role-based authorization and durable audit events.
+- API-driven validation, inventory, planning, apply, reports, target credential upload/rotation, and credential status.
+- Embedded web UI over the same versioned API exposed to automation clients.
+- Kubernetes Secret storage for Kibana API keys and CA trust bundles.
+- JSON/PVC storage for plans, reports, inventory, jobs, source snapshots, and audit records.
+- Production Docker image, Kubernetes Deployment/Service/Ingress/PVC/RBAC examples, and local Docker test tooling.
 
 ### Out of scope
 
+- An operator reconciliation CLI or Kubernetes planner/applier Jobs.
+- Editing target configuration or desired resources through the API/UI.
+- Git clone, fetch, checkout, polling, webhooks, commits, or branch orchestration by the service.
+- Multiple server replicas, HA, leader election, or a database in v1.
 - Elastic 8.x or 10.x.
 - Internal or undocumented Kibana endpoints.
-- A hosted service, persistent application daemon, database server, telemetry, or automatic polling.
-- Automatic Git operations, commits, pushes, pull requests, or deployment.
-- Cross-target transactions, rollback, or implicit replanning.
-- Individual installation, update, or pruning of Elastic prebuilt rules.
-- A Kubernetes Service or Ingress for the web interface.
-- Protection against a malicious process acting as the same operating-system user or modifying the binary, plan, state, or mounted files.
+- Automatic reconciliation, scheduled apply, rollback, cross-target transactions, or plan resume.
+- Individual installation/update/pruning of prebuilt rules.
+- Uploading plans or application state through the API.
+- Storing Kibana credentials or certificate contents on the PVC, in plans/reports/logs, or in browser storage.
+- Client-certificate/mTLS authentication to Kibana.
+- Protection against a malicious cluster administrator, container runtime, or process with equivalent pod/Secret/PVC access.
 
-## 4. Deliverables and repository migration
+## 4. Runtime architecture
 
-Replace the prototype with:
+### Components
 
-- `cmd/elastic-maintainer`: Cobra CLI entry point.
-- `internal/config`: strict target configuration loading and validation.
-- `internal/manifest`: strict YAML envelope decoding, indexing, selectors, references, and input digests.
-- `internal/kibana`: authenticated HTTP client, spaces routing, version discovery, pagination, canonicalization, and resource adapters.
-- `internal/reconcile`: inventory, diffing, ownership checks, dependency graph, plan generation, and apply execution.
-- `internal/planfile`: versioned JSON plan and apply-report formats.
-- `internal/state`: file-backed managed-ID inventory, locking, atomic writes, and operation journal recovery.
-- `internal/web`: embedded static UI and loopback HTTP API using the same application services as the CLI.
-- `examples/elastic-maintainer.yaml` and representative manifests for every supported kind.
-- `deploy/kubernetes`: production-oriented planner and applier Job examples with ConfigMap/Secret/PVC mounts.
-- `Dockerfile`: reproducible, non-root runtime image containing the single binary and CA certificates.
-- `Makefile` or equivalent local build/test tooling.
-- `start-web.sh`: local-only launcher for configured targets or a disposable Docker Elastic/Kibana test stack.
-- Updated operator documentation and tests.
+- `cmd/elastic-maintainer`: server entry point.
+- `internal/server`: HTTP server, routing, middleware, lifecycle, and health/readiness.
+- `internal/auth`: OIDC login/callback/session handling, bearer-token validation, role mapping, and authorization.
+- `internal/api`: `/api/v1` handlers, request/response types, OpenAPI contract, and safe errors.
+- `internal/config`: strict mounted server/target/resource-set configuration.
+- `internal/manifest`: strict resource envelopes, schemas, selectors, references, source snapshots, and digests.
+- `internal/secrets`: Kubernetes Secret provisioning and retrieval through a narrow interface.
+- `internal/kibana`: version-aware public API client and adapters.
+- `internal/reconcile`: inventory, ownership, diff, DAG, plan, and apply logic.
+- `internal/state`: PVC file formats, locking, atomic writes, journals, jobs, reports, and audit storage.
+- `internal/web`: embedded UI assets consuming `/api/v1` only.
 
-Remove or replace the old `cmd/elastic-maintenance` command, JSON model, `config/desired-state.json`, old review/apply implementation, obsolete tests, and stale documentation. Preserve Git history; do not remove or rewrite the configured remote.
+### Process model
 
-## 5. Command-line interfaces
+- One long-running process and one Kubernetes replica.
+- The server reads mounted configuration at startup and revalidates it before validation/plan operations.
+- Source content is never edited. No filesystem watcher or automatic polling is required; operators explicitly request refresh/validation/plan.
+- Validation, plan, and apply run as durable asynchronous jobs.
+- At most one mutation job runs per state directory. Target locks remain the final operation guard.
+- Read-only API requests may run concurrently within configured limits.
 
-Produce one `elastic-maintainer` binary with Cobra, `gopkg.in/yaml.v3`, `net/http`, and structured `slog` logging.
-
-Commands:
+### Startup interface
 
 ```text
-elastic-maintainer validate --config <file> --manifests <dir>
-elastic-maintainer plan --config <file> --manifests <dir> --out <plan.json> [--target <selector>] [--state-dir <dir>]
-elastic-maintainer apply --plan <plan.json> [--report <report.json>] [--state-dir <dir>]
-elastic-maintainer serve --config <file> --manifests <dir> [--plans-dir <dir>] [--state-dir <dir>] [--listen <loopback:port>]
-elastic-maintainer version
+elastic-maintainer --config <server.yaml> [--listen <address>] [--state-dir <dir>] [--version]
 ```
 
-Rules:
+- Defaults may come from environment variables suitable for Kubernetes.
+- There are no `validate`, `plan`, `apply`, or `serve` subcommands.
+- `--version` prints build identity and exits.
+- Production listen defaults to `:8080`; exposure and TLS are controlled by Kubernetes Service/Ingress.
+- Local testing may bind loopback directly.
 
-- `--target` may be repeated. Each value is either an exact target name or a comma-separated conjunction of `key=value` target-label clauses. Repeated selectors are ORed. Duplicate selections collapse by target identity.
-- Default state directory: `$XDG_STATE_HOME/elastic-maintainer`, falling back to the platform user-state directory. In Kubernetes it must be set to a mounted writable volume.
-- `apply` obtains the original configuration and manifest paths from the plan. It has no config or manifest override flags.
-- The default apply-report path is `<plan-path>.apply-report.json`; `--report` overrides it.
-- Human output is deterministic. `--json` may be added as a global machine-output flag, but logs remain on stderr and results on stdout.
-- Exit codes: `0` success, `1` validation/plan/apply rejection or total failure, and `2` partial apply where at least one target succeeded and at least one target failed or was blocked. A successful plan command returns `0` whether or not it contains operations.
+## 5. Mounted configuration and branch-separated resource sets
 
-## 6. Target configuration
-
-Use strict YAML in `elastic-maintainer.yaml`:
+Use strict mounted YAML:
 
 ```yaml
 apiVersion: elastic-maintainer/v1alpha1
 stateID: security-platform
+publicURL: https://elastic-maintainer.example.test
+
+resourceSets:
+  production:
+    path: /var/lib/elastic-maintainer/sources/production
+    revisionFile: .source-revision
+  staging:
+    path: /var/lib/elastic-maintainer/sources/staging
+    revisionFile: .source-revision
 
 targets:
   production-default:
@@ -105,27 +125,29 @@ targets:
     space: default
     labels:
       environment: production
-      region: eu-west
-    apiKeyEnv: KIBANA_PRODUCTION_API_KEY
-    caFile: /etc/elastic-maintainer/ca.pem
+    resourceSet: production
+    credentialSecret:
+      namespace: elastic-maintainer
+      name: elastic-maintainer-target-production-default
 ```
 
-Requirements:
+Rules:
 
-- Reject unknown fields, duplicate YAML keys, duplicate target names, invalid URLs, invalid label keys, empty API-key environment references, and unreadable CA files.
-- `stateID` is required and stable. It separates managed-resource inventories belonging to different desired-state configurations.
-- A target identity is the tuple `(stateID, target name, normalized URL, space)`. Renaming a target or changing URL/space creates a new identity and does not transfer pruning authority automatically.
-- Omit `space` or use `default` for Kibana’s default space. Non-default API paths use `/s/{url-escaped-space}/...`.
-- Require HTTPS except for explicit loopback URLs (`localhost`, `127.0.0.0/8`, or `[::1]`) used for development and tests.
-- Resolve and read API keys only when remote access is needed. `validate` verifies the environment-variable name but does not require its value unless remote validation is explicitly added later.
-- Read CA contents into a target-specific digest. A changed CA file invalidates that target’s plan.
-- Never serialize environment-variable values or authorization headers.
+- Mounted configuration and resource sets are authoritative and read-only to the application.
+- Each target references exactly one resource set. Multiple targets may share one set.
+- Different Git branches/revisions are mounted as distinct paths by GitOps, CSI, init-container, or other external orchestration.
+- `revisionFile` is optional display/provenance metadata. Eligibility is based on canonical content digest, not a claimed branch name/revision alone.
+- A changed mount is detected on explicit validation/plan and before apply through source digests.
+- `stateID` is required and stable.
+- Target identity is `(stateID, target name, normalized URL, space)`.
+- Renaming a target or changing URL/space creates a new identity and never transfers pruning authority automatically.
+- Reject unknown fields, duplicate YAML keys, duplicate names, invalid URLs/labels, missing resource sets, unsafe paths, and unapproved Secret namespace/name patterns.
+- Require HTTPS for Kibana except explicit loopback development targets.
+- The API never changes this file or the mounted resource content.
 
-## 7. Manifest format and identity
+## 6. Manifest format and identity
 
-Read `.yaml` and `.yml` files recursively in lexical relative-path order. Reject symlinks, files escaping the manifest root, duplicate YAML keys, unknown envelope fields, empty documents, and unsupported API versions or kinds. A file may contain one or more YAML documents.
-
-Envelope:
+Read `.yaml` and `.yml` recursively in lexical relative-path order. Reject symlinks, traversal, special files, duplicate keys, unknown envelope fields, empty documents, and unsupported versions/kinds. Files may contain multiple YAML documents.
 
 ```yaml
 apiVersion: elastic-maintainer/v1alpha1
@@ -140,376 +162,412 @@ metadata:
 spec: {}
 ```
 
-Semantics:
+- `metadata.id` is required and stable.
+- `(kind, metadata.id)` is unique within a resource set.
+- `metadata.name` is display text, not identity.
+- `targetSelector.matchLabels` is an exact-match conjunction evaluated against targets assigned to that resource set.
+- `dependsOn` uses `<Kind>/<metadata.id>`.
+- Reject dangling, cross-selector, self, duplicate, and cyclic references.
+- `PackagePolicy.spec.agentPolicyRef` and `.integrationRef` resolve logical desired IDs.
+- Strict kind schemas reject unknown fields and credential-bearing fields.
 
-- `metadata.id` is a required, caller-defined stable logical ID.
-- `(kind, metadata.id)` must be unique across the complete manifest set, not merely per file or target.
-- `metadata.name` is required operator-facing text. It is not identity.
-- `targetSelector.matchLabels` is an exact-match conjunction. An omitted or empty selector applies to every target.
-- `dependsOn` contains explicit references formatted as `<Kind>/<metadata.id>`.
-- References must resolve in the manifest set and must apply to every target where the referencing resource applies. Reject dangling, cross-selector, self, and cyclic references.
-- Resource-specific references are represented as logical IDs, then resolved into API fields during planning. In particular, `PackagePolicy.spec.agentPolicyRef` and `PackagePolicy.spec.integrationRef` refer to desired `AgentPolicy` and `IntegrationPackage` resources.
-- Strict resource schemas reject unknown fields and invalid combinations before any remote request.
+Stable remote mapping:
 
-Stable remote identity mapping:
-
-| Kind | Stable logical/remote identity |
+| Kind | Stable identity |
 | --- | --- |
-| `IntegrationPackage` | `metadata.id`; `spec.name` is the EPM package name and must be unique per selected target |
-| `AgentPolicy` | `metadata.id`, sent as Fleet’s caller-defined policy `id` |
-| `PackagePolicy` | `metadata.id`, sent as Fleet’s caller-defined package-policy `id` |
-| `DetectionRule` | `metadata.id`, sent as Kibana `rule_id` |
-| `PrebuiltRules` | `metadata.id`; only one may apply to a target and it controls the collective prebuilt package operation |
+| `IntegrationPackage` | `metadata.id`; `spec.name` is unique per target |
+| `AgentPolicy` | `metadata.id`, sent as Fleet caller-defined `id` |
+| `PackagePolicy` | `metadata.id`, sent as Fleet caller-defined `id` |
+| `DetectionRule` | `metadata.id`, sent as `rule_id` |
+| `PrebuiltRules` | `metadata.id`; at most one applies to a target |
 
-## 8. Supported resources
+## 7. Authentication, sessions, and authorization
+
+### OIDC
+
+- Use Authorization Code flow with PKCE for browser login.
+- Validate issuer, audience/client ID, signature, expiry, nonce, and state.
+- Use secure, HttpOnly, SameSite cookies protected by a Kubernetes Secret-backed session key.
+- Do not store access/ID tokens in browser local/session storage.
+- Validate external automation bearer tokens against the same configured issuer and audience.
+- Disable arbitrary CORS by default; use a strict configured origin allowlist only when external browser origins are required.
+
+### Roles
+
+| Role | Capabilities |
+| --- | --- |
+| `viewer` | View validation, source/target inventory, credential status (never values), plans, jobs, reports, and audit events permitted by policy |
+| `planner` | Viewer capabilities plus request validation/refresh and generate plans |
+| `applier` | Viewer capabilities plus approve/apply saved plans; may apply own plan |
+| `administrator` | All capabilities plus upload/rotate/delete target credentials and manage operational settings allowed by mounted configuration |
+
+- Map OIDC groups/claims to roles through mounted configuration.
+- Deny by default and enforce authorization in middleware plus service-layer checks.
+- Record actor subject, roles, request ID, action, target/plan/job IDs, result, and timestamp in audit events.
+- Never place tokens, API keys, certificates, or sensitive request bodies in audit records.
+
+## 8. Kubernetes Secret provisioning
+
+### Credential API
+
+Administrators may upload:
+
+- one Kibana API key; and
+- an optional PEM CA trust bundle.
+
+The server writes an `Opaque` Secret at the exact namespace/name declared for the mounted target:
+
+- `api-key`: Kibana API-key value;
+- `ca.crt`: optional CA bundle.
+
+### Safety model
+
+- Require TLS on the public ingress before enabling credential upload.
+- Accept credentials only in bounded JSON requests; never via query strings, headers used for logging, or multipart temporary files.
+- Mark credential responses and endpoints `Cache-Control: no-store`.
+- Never echo values after submission.
+- Redact request bodies from access/error/audit logs and tracing.
+- Validate API key non-empty/size and parse PEM CA certificates before writing.
+- The server never writes credential contents to PVC state.
+- Store only Secret namespace/name, resource version, last-rotated timestamp, actor, and non-secret certificate metadata/fingerprint.
+- Read credentials from the Kubernetes API only when validating/planning/applying the target; keep them in memory for the request/job lifetime.
+- Never send API keys or CA contents to the browser after upload.
+- Restrict Secret operations to the deployment namespace and configured `elastic-maintainer-target-` name prefix.
+- Require exact application ownership labels/annotations before update/delete.
+- Refuse to overwrite or delete unrelated Secrets.
+- Use a dedicated namespace because Kubernetes RBAC cannot enforce the application’s name-prefix ownership policy for Secret creation by itself.
+- Grant the ServiceAccount only required Secret get/create/update/patch/delete verbs in that namespace plus no unrelated cluster permissions.
+- Deleting a credential Secret is blocked while a mutation job uses it and leaves target configuration intact but target status unready.
+- CA support is trust-bundle only; no client private key/certificate fields exist in v1.
+
+## 9. Versioned API and job model
+
+Base path: `/api/v1`. Publish `/api/v1/openapi.json` and render API documentation for authorized users.
+
+### Core endpoints
+
+- `GET /health/live` and `GET /health/ready`: narrow unauthenticated probes.
+- `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`.
+- `GET /api/v1/session`.
+- `GET /api/v1/sources` and `GET /api/v1/sources/{id}`.
+- `POST /api/v1/validations`; `GET /api/v1/validations/{jobID}`.
+- `GET /api/v1/targets` and `GET /api/v1/targets/{id}`.
+- `PUT /api/v1/targets/{id}/credentials`; `DELETE /api/v1/targets/{id}/credentials`; `GET .../credential-status`.
+- `POST /api/v1/plans`; `GET /api/v1/plans`; `GET /api/v1/plans/{id}`.
+- `POST /api/v1/plans/{id}/apply`.
+- `GET /api/v1/jobs`; `GET /api/v1/jobs/{id}`; optional `GET /api/v1/jobs/{id}/events` using SSE.
+- `GET /api/v1/reports`; `GET /api/v1/reports/{id}`.
+- `GET /api/v1/audit` for authorized roles.
+
+### API rules
+
+- JSON request/response bodies only, except SSE and static UI assets.
+- Strict decoding, unknown-field rejection, bounded bodies, pagination, request IDs, and versioned safe error envelopes.
+- Idempotency keys are required for credential upload/rotation, plan creation, and apply initiation.
+- Cookie-authenticated mutations require CSRF tokens and same-origin checks. Valid bearer-token clients do not use cookies and are not subject to CSRF, but remain subject to CORS and authorization.
+- GET/HEAD routes are side-effect free.
+- Plan/apply endpoints enqueue durable jobs and return `202 Accepted` with job IDs.
+- Clients poll jobs or use bounded authenticated SSE; job execution does not depend on a connected browser.
+- The OpenAPI document is tested against handlers and published examples.
+
+## 10. Resource adapters and public Kibana APIs
 
 ### IntegrationPackage
 
-- Require `spec.name` and an exact pinned semantic `spec.version`; reject `latest` and ranges.
-- Install when missing and upgrade when the installed version differs and the requested transition is supported.
-- Never uninstall or downgrade automatically. An installed version newer than desired is a conflict unless the public API contract and an explicit future option permit downgrade.
-- Use the public EPM package APIs common to both supported versions, including:
-  - installed-package inventory: `GET /api/fleet/epm/packages/installed`
-  - exact-version read: `GET /api/fleet/epm/packages/{pkgName}/{pkgVersion}`
-  - exact install: `POST /api/fleet/epm/packages/{pkgName}/{pkgVersion}`
-- Do not depend on unversioned `GET /api/fleet/epm/packages/{pkgName}` because it is absent from the Kibana 9.2.0 public specification.
+- Require exact pinned semantic versions; reject `latest` and ranges.
+- Read through common endpoints:
+  - `GET /api/fleet/epm/packages/installed`
+  - `GET /api/fleet/epm/packages/{pkgName}/{pkgVersion}`
+- Install with `POST /api/fleet/epm/packages/{pkgName}/{pkgVersion}`.
+- Do not depend on unversioned package GET absent from 9.2.0.
+- Never uninstall or automatically downgrade.
 
 ### AgentPolicy
 
-- Create and update a caller-ID policy through the public Fleet agent-policy APIs.
-- Preserve the ownership marker `[managed-by:elastic-maintainer]` in the description while reconciling operator-supplied description text.
-- Prune only with inventory authority and a matching marker.
+- Use public Fleet agent-policy read/create/update/delete APIs.
+- Use caller-defined ID.
+- Reconcile `[managed-by:elastic-maintainer]` in description.
+- Prune only with inventory plus matching marker.
 
 ### PackagePolicy
 
-- Require logical references to an `AgentPolicy` and `IntegrationPackage` that apply to the same target.
-- Resolve those references to `policy_id`, package name, and exact package version.
-- Create and update through the public Fleet package-policy APIs using the caller-defined ID.
-- Preserve `[managed-by:elastic-maintainer]` in the description.
-- Prune only with inventory authority and a matching marker.
+- Resolve desired integration/agent references.
+- Use caller-defined ID and public Fleet package-policy APIs.
+- Reconcile the managed description marker.
+- Prune only with inventory plus matching marker.
 
 ### DetectionRule
 
-- Manage custom rules only through the public detection-rule APIs.
-- Set `rule_id` from `metadata.id` and add `elastic-maintainer:managed` to tags without dropping desired user tags.
-- Reject desired rules identified by the API as immutable/prebuilt.
-- Use complete update requests because Kibana removes omitted fields during rule replacement.
-- Prune only with inventory authority and a matching tag.
+- Manage custom rules only through public detection-rule APIs.
+- Use `rule_id` and `elastic-maintainer:managed` tag.
+- Build complete replacement PUT bodies.
+- Reject immutable/prebuilt collisions.
+- Prune only with inventory plus matching marker.
 
 ### PrebuiltRules
 
-- Allow at most one desired `PrebuiltRules` resource per target.
-- Read collective status with `GET /api/detection_engine/rules/prepackaged/_status`.
-- Install or update all Elastic prebuilt rules and Timelines with `PUT /api/detection_engine/rules/prepackaged`.
-- Never update, disable, or prune individual prebuilt rules.
-- Treat the operation as collective and canonicalize only documented status/count/version fields needed to determine drift.
+- Read `GET /api/detection_engine/rules/prepackaged/_status`.
+- Install/update collectively with `PUT /api/detection_engine/rules/prepackaged`.
+- Never mutate or prune individual prebuilt rules.
 
-All adapters must use documented Kibana v9 public APIs and add the correct space prefix. API contract references belong in code comments and the operator guide, including:
+References:
 
-- Elastic Package Manager: https://www.elastic.co/docs/api/doc/kibana/v9/group/endpoint-elastic-package-manager-epm
+- EPM: https://www.elastic.co/docs/api/doc/kibana/v9/group/endpoint-elastic-package-manager-epm
 - Agent policies: https://www.elastic.co/docs/api/doc/kibana/v9/group/endpoint-elastic-agent-policies
 - Package policies: https://www.elastic.co/docs/api/doc/kibana/v9/group/endpoint-fleet-package-policies
-- Detection rules and collective prebuilt rules: https://www.elastic.co/docs/api/doc/kibana/v9/group/endpoint-security-detections-api
+- Detection/prebuilt rules: https://www.elastic.co/docs/api/doc/kibana/v9/group/endpoint-security-detections-api
 
-## 9. API client and canonicalization
+## 11. Kibana client and canonicalization
 
-- Discover Kibana version before planning and recheck it before apply. Reject unsupported versions before reading mutable resources.
-- Use a configured HTTP client with CA support, bounded connect/header/request timeouts, response-size limits, context cancellation, and no automatic cross-host redirects carrying authorization.
-- Send `Authorization: ApiKey ...` and `kbn-xsrf` where required. Never place credentials in URLs.
-- Implement every documented pagination style used by supported list APIs; never assume a single large page is complete.
-- Classify errors as authentication, authorization, unsupported version, validation, conflict, not found, rate limit, timeout, and remote failure without logging sensitive response bodies.
-- Do not retry mutations automatically. Bounded retries with backoff are allowed only for demonstrably idempotent reads and documented throttling/transient failures.
-- Canonicalize desired and live resources through adapter-specific typed projections. Exclude server IDs not used as stable identity, revisions, timestamps, execution summaries, generated fields, and unrelated defaults.
-- Normalize semantically unordered maps, sets, tags, and index lists. Preserve ordering where the public API defines it as meaningful.
-- Fingerprint canonical JSON with an explicit algorithm and format version, initially SHA-256 over RFC 8785-style deterministic JSON produced by the tool.
+- Discover Kibana version before planning and recheck before apply.
+- Build per-target TLS clients from system roots plus uploaded CA Secret contents.
+- Use bounded timeouts, response limits, context cancellation, and cross-host redirect rejection.
+- Send credentials only in `Authorization: ApiKey`.
+- Implement all documented pagination styles completely.
+- Classify authentication, authorization, compatibility, validation, conflict, not-found, throttling, timeout, and remote errors safely.
+- Retry only idempotent reads for narrowly classified transient failures. Never retry mutations automatically.
+- Canonicalize typed desired/live projections, excluding generated IDs, revisions, timestamps, execution summaries, and unrelated defaults.
+- Normalize semantic sets and preserve meaningful ordering.
+- Fingerprint RFC 8785 canonical JSON with SHA-256 and explicit format versions.
 
-## 10. Dependency graph and planning
+## 12. Dependency planning and ownership
 
-Build a per-target directed acyclic graph.
+Build a per-target DAG:
 
-- Add automatic edges from each `PackagePolicy` to its referenced `IntegrationPackage` and `AgentPolicy`.
-- Add explicit `metadata.dependsOn` edges.
-- Apply a stable phase preference—integrations, agent policies, package policies, detection rules/prebuilt rules—only as a tie-breaker among ready nodes. Phase order alone does not make unrelated resources dependent.
-- Use `(phase, kind, metadata.id, action)` as the deterministic operation ordering key.
-- If an operation fails, mark only its transitive dependants skipped. Continue independent operations on that target and all operations on independent targets.
-- Ownership conflicts and unsupported transitions are planning errors for the affected target. Other selected targets may still produce plans, but the overall plan command fails and must not write an applicable plan unless every selected target planned successfully.
+- Automatic edges from package policies to referenced integration/agent policies.
+- Explicit `dependsOn` edges.
+- Stable phase preference only as a tie-breaker among ready nodes.
+- A failed operation skips only transitive dependants; unrelated target/resources continue.
 
-Operation classes are `create`, `update`, and `delete`. Unchanged resources are observations, not operations, so a converged plan has zero operations.
+Ownership markers are necessary but insufficient for deletion. Durable target inventory is also required.
 
-## 11. Managed inventory and pruning authority
+- Marker-only resources are never adopted automatically.
+- Missing/altered markers, changed IDs, ambiguous lookups, or missing inventory are conflicts/safe orphans, never deletes.
+- Integration packages and prebuilt rules are never pruned.
 
-Ownership markers are necessary but not sufficient for deletion. Durable inventory grants pruning authority.
+## 13. PVC state and single-replica constraints
 
-Store versioned JSON state under:
+Store versioned non-secret files under the state directory:
 
 ```text
-<state-dir>/inventories/<hash-of-target-identity>.json
-<state-dir>/journals/<hash-of-target-identity>.json
-<state-dir>/locks/<hash-of-target-identity>.lock
+config-snapshots/
+sources/
+inventories/
+journals/
+plans/
+jobs/
+reports/
+audit/
+locks/
 ```
 
-Inventory entries contain only non-secret data: state and target identity, kind, logical ID, remote stable ID, ownership-marker type, last confirmed desired fingerprint, and timestamps used for diagnostics.
+- Use owner-only permissions, symlink/path defenses, per-target/process locks, atomic same-directory writes, and fsync where supported.
+- Never store API keys, CA contents, OIDC tokens, session keys, authorization headers, or credential request bodies.
+- Store plans server-side only; no plan upload endpoint exists.
+- Keep durable job state so status survives browser disconnect and server restart.
+- Recover pending operation journals by comparing baseline/current/expected post-state.
+- Record append-oriented audit segments safely; rotate without deleting required evidence automatically.
+- V1 requires exactly one replica, a ReadWriteOnce PVC, and a deployment strategy that prevents simultaneous writers.
+- Readiness fails when required mounted config/state is unsafe; target credential absence affects target readiness/status, not process liveness.
+- Future multi-replica support requires a transactional shared database/queue and is explicitly a later architecture version.
 
-Rules:
+## 14. Source snapshots and saved-plan safety
 
-- A resource becomes inventory-managed only after a successful create/update performed by this tool and confirmation that the expected stable ID and ownership marker exist.
-- Merely discovering a matching marker never adopts a resource.
-- A missing desired custom rule, agent policy, or package policy produces a delete operation only when the exact target inventory contains the same kind/stable ID and the live object still has the expected marker.
-- A missing or altered marker, changed stable identity, ambiguous lookup, or missing inventory produces an ownership conflict or safe orphan observation, never deletion.
-- Removing an `IntegrationPackage` or `PrebuiltRules` manifest never creates delete operations.
-- Lock state per target during plan state reads and apply mutations. Write files atomically using a same-directory temporary file, fsync where supported, rename, and owner-only permissions.
-- Before each remote mutation, write a non-secret journal entry containing the plan ID, operation identity, baseline fingerprint, and expected post-state fingerprint. After success and verification, update inventory and clear the journal atomically.
-- On startup, recover a pending journal by reading the resource: commit inventory if it exactly matches expected post-state, clear the journal if it still matches baseline, and otherwise stop with a recovery conflict requiring operator action.
-- State corruption or an unavailable writable state directory disables mutation and pruning; it never falls back to marker-only authority.
+A plan records:
 
-In Kubernetes, state and plans must be stored on a PVC or another mounted volume with equivalent persistence and single-writer semantics. An ephemeral `emptyDir` is suitable only for disposable tests where pruning authority does not need to survive pod replacement.
+- format/tool versions, plan ID, creator, creation time, source/resource-set identity, and displayed external revision metadata;
+- selected target identities and Kibana versions;
+- canonical mounted config/resource digests and source-file diagnostics;
+- canonical operations/dependencies, desired fingerprints, baseline fingerprints, and expected post-state;
+- inventory generation/fingerprint for deletes;
+- unchanged observations and ownership conflicts.
 
-## 12. Input digests and saved-plan format
+Before apply:
 
-A versioned plan is non-secret JSON containing:
+1. Acquire locks and recover journals.
+2. Re-read mounted configuration/resource set and recompute target-specific desired digests.
+3. Read the target Secret and build TLS/API-key client in memory.
+4. Recheck Kibana version.
+5. Re-fetch every affected resource and compare baseline fingerprints.
+6. Recheck inventory and live markers for deletes.
+7. Reject the target before first mutation if any precondition changed.
 
-- plan format version, tool version, plan ID, and creation time;
-- absolute cleaned config path and manifest-root path used on the planning machine/container;
-- `stateID`, selected target identities, discovered Kibana versions, and API contract version;
-- for each target, a target-input digest and CA-content digest;
-- for each target, the sorted applicable manifest file/document identities and a canonical desired-resource digest;
-- canonical operations with dependency IDs, desired payload fingerprints, baseline fingerprints, and expected post-state fingerprints;
-- unchanged observations and ownership conflicts needed for review;
-- inventory generation/fingerprint used to authorize any delete.
+Plans are trusted internal artifacts, strict-decoded, and inaccessible for client editing. The service does not claim cryptographic integrity against a process/PVC administrator.
 
-Digest behavior:
+## 15. Apply and partial failure
 
-- Compute the target-input digest from only the selected target’s normalized configuration, target labels, API-key environment-variable name (not value), URL/space, and CA contents.
-- Compute desired digests per target from the canonical decoded resources applicable to that target. An unrelated target or manifest edit must not invalidate another target’s operations.
-- Also record source-file SHA-256 values for diagnostics. Whitespace-only source changes may change source-file diagnostics, but apply eligibility is based on canonical target inputs and desired resources.
-- Apply re-reads the recorded config and manifest paths and reconstructs the same per-target canonical inputs.
-- For create/update, verify that each plan payload fingerprint still equals the current canonical desired resource. For delete, verify that the resource is still absent from desired state and that the recorded inventory still grants authority.
+- Verify source/desired/credential presence/version/live baselines before each target starts.
+- Write a journal before each remote mutation.
+- Verify expected post-state before committing inventory and clearing journal.
+- Continue independent targets/resources; skip only transitive dependants.
+- Never roll back.
+- Persist per-operation/target reports: created, updated, deleted, unchanged, skipped, conflicted, rejected, failed.
+- Once any mutation succeeds, the plan is operationally consumed.
+- Any result requires a new plan before another attempt; no resume/force/implicit replan.
 
-Plan trust model:
+## 16. Web interface
 
-- Plans are trusted local/operator-controlled files and are not signed or authenticated.
-- Apply performs strict JSON decoding, rejects unknown fields and unsupported format/tool versions, and enforces semantic validations above.
-- Apply does not use a self-hash as a security claim and does not promise to reject harmless metadata edits or an attacker capable of modifying all same-user files.
-- Editing a plan is unsupported. The documented safe workflow is always to generate a new plan.
-- Plans, reports, inventory, journals, and logs must never contain API-key values or authorization headers.
+The embedded UI is the primary operator experience and consumes `/api/v1` only.
 
-## 13. Apply safety and partial failure
+It provides:
 
-Before mutating a target, apply must:
+- OIDC login/session/role display;
+- mounted source/revision and validation status;
+- target/resource inventory and target-to-resource-set assignment;
+- credential status, upload, rotation, certificate metadata, and deletion for administrators—never values;
+- asynchronous validation/plan/apply job progress;
+- saved-plan operation/dependency/ownership/drift review;
+- explicit apply confirmation;
+- partial failure/rejection reports and new-plan guidance;
+- authorized audit-event review;
+- OpenAPI documentation links for automation users.
 
-1. Acquire the target state lock and resolve any journal.
-2. Re-read and validate the recorded configuration and manifests.
-3. Recompute the target-specific input and desired digests.
-4. Resolve the target API key freshly from its declared environment variable.
-5. Recheck Kibana version compatibility.
-6. Re-read every affected resource and compare its canonical baseline fingerprint, including the absence sentinel for creates.
-7. Recheck inventory generation and ownership markers for deletes.
-8. Reject the entire target before its first mutation if any precondition changed.
+Security:
 
-Execution rules:
+- Require TLS public URL and validate expected Host/forwarded-host/proto only from configured trusted proxies.
+- Enforce OIDC, RBAC, CSRF for cookie mutations, strict origins, JSON content types, body limits, secure headers, CSP, no-store where sensitive, and safe error responses.
+- Do not use browser local storage for tokens or credentials.
+- Do not ship runtime CDN dependencies.
 
-- Targets are independent. A rejected or failed target does not block unrelated targets.
-- Within a target, execute the stable dependency order and skip only transitive dependants of failed operations.
-- Verify expected post-state after each mutation before updating inventory.
-- Do not roll back completed operations.
-- Persist an atomic apply report with per-target and per-operation outcomes: created, updated, deleted, unchanged, skipped, conflicted, rejected, and failed.
-- Once any operation has succeeded, the plan is consumed for operational purposes. Whether apply fully or partially succeeds, retry requires an explicit new `plan` command against current state.
-- Reapplying an old plan normally fails baseline checks. There is no `resume`, `force`, or implicit replan option in v1.
-
-## 14. Web interface
-
-The embedded Kibana-style web interface exposes:
-
-- validation results;
-- selected target and desired-resource inventory;
-- saved-plan summaries and operation/dependency review;
-- ownership conflicts, drift, and rejected-target explanations;
-- apply initiation and persisted per-target reports;
-- partial-failure and “generate a new plan” guidance.
-
-The web layer calls the same validation, planning, state, and apply services as the CLI. It must not implement alternate reconciliation logic.
-
-Security requirements:
-
-- Accept only literal loopback listen addresses and reject wildcard or non-loopback binds.
-- Permit only expected `Host` values for the bound listener to resist DNS rebinding.
-- Make all GET/HEAD routes side-effect free.
-- Require `application/json`, a same-origin `Origin` when present, compatible Fetch Metadata headers, and a per-process CSRF token for mutation requests.
-- Set a restrictive Content Security Policy, `X-Content-Type-Options: nosniff`, no-store headers for sensitive operational pages/API responses, and conservative frame/referrer policies.
-- Serialize mutation jobs: only one plan/apply mutation may run per state directory at a time, with visible busy/conflict responses.
-- Keep API keys exclusively in the server process environment. Never return credentials, authorization headers, unrestricted environment data, or sensitive remote response bodies to the browser.
-- The Kubernetes manifests do not expose `serve` through a Service or Ingress. Local use against Kubernetes may use an explicitly operator-controlled port-forward only if the loopback security model remains intact.
-
-## 15. Container and Kubernetes delivery
+## 17. Container and Kubernetes delivery
 
 ### Container
 
-- Use a pinned Go builder image and a minimal non-root runtime image with CA certificates.
-- Build a reproducible `elastic-maintainer` binary, record version/commit metadata at link time, and include no example credentials or writable repository content.
-- Support read-only config/manifest mounts and separate writable plan/state/report mounts.
-- Document image invocation for `validate`, `plan`, and `apply`.
+- Pinned builder/runtime images, reproducible binary, non-root user, CA certificates, read-only root filesystem, and no embedded secrets.
+- Read-only mounts for config/resource sets; writable PVC mount for non-secret state.
 
 ### Kubernetes
 
-Provide plain manifests or a small Kustomize-ready base for:
+Provide:
 
-- a planner Job that mounts target config/manifests read-only, API keys from Secrets, and writes plans/reports/state to a PVC;
-- a separate applier Job that consumes an explicitly selected saved plan from the same PVC;
-- least-privilege pod security settings: non-root, read-only root filesystem, dropped capabilities, seccomp runtime default, bounded resources, and no service-account token unless required;
-- ConfigMap/Secret/PVC examples without embedding real credentials;
-- a NetworkPolicy example limiting egress to DNS and declared Kibana endpoints where cluster policy supports it.
+- single-replica Deployment with Recreate strategy;
+- ClusterIP Service and TLS Ingress examples;
+- ReadWriteOnce PVC;
+- mounted config and one or more externally orchestrated resource-set volumes;
+- OIDC/session configuration using ConfigMaps/Secrets;
+- dedicated ServiceAccount/Role/RoleBinding for namespaced Secret operations;
+- pod security context, resource limits, probes, disruption constraints consistent with one replica, and NetworkPolicy examples;
+- no planner/applier Jobs, controller, CronJob, or automatic reconcile loop.
 
-Do not deploy a long-running controller, automatic reconciliation loop, web Service, or Ingress. Operators are responsible for creating the planner and applier Jobs and approving the plan between them.
+### Local testing
 
-### Local test launcher
+`start-web.sh` may run the server against configured mounts or owned disposable Docker Elasticsearch/Kibana containers. It must ownership-label objects, bind ports to loopback, avoid printing secrets, and remain clearly non-production tooling.
 
-`start-web.sh` may:
+## 18. Logging, audit, and redaction
 
-- build and launch the loopback web interface against operator-provided targets; or
-- create an owned, disposable Docker network, Elasticsearch container, Kibana container, volumes, and ephemeral API key for local contract testing.
+- Use `slog` with request/job/actor/target/resource/operation/outcome fields.
+- Never log authorization headers, OIDC tokens, cookies, API keys, certificate bodies, Secret objects, credential request bodies, or unbounded remote responses.
+- Centralize redaction before logs/API/audit/state serialization.
+- Record durable security/operation audit events without secret data.
+- Add sentinel scans across logs, audit, plans, reports, jobs, state, HTTP responses, and container output.
 
-It must label and ownership-check every Docker object before reuse/removal, bind published ports to loopback, avoid printing secrets, revoke ephemeral keys when possible, and never be represented as production deployment tooling.
+## 19. Implementation phases
 
-## 16. Logging, redaction, and reports
+### Phase 0 — contract fixtures and API-server migration skeleton
 
-- Use `slog` with stable fields such as target, space, kind, resource ID, operation, phase, duration, and outcome.
-- Centralize redaction. Never log API keys, authorization headers, full environment maps, raw Secret objects, or unbounded remote bodies.
-- Sanitize errors before logging or serializing them to plans/reports/web responses.
-- Human summaries are deterministic and show each target independently.
-- Machine reports use a versioned schema and contain no credentials.
-- Add tests that scan serialized plans, reports, state, logs, and HTTP responses using sentinel secret values.
+Detailed sub-plan: `docs/implementation/subplans/phase-0-contract-fixtures-and-api-server-migration-skeleton.md`
 
-## 17. Implementation phases
+- Preserve existing pinned Kibana contracts/fixtures.
+- Replace CLI-first migration assumptions with server startup, routing, health, OpenAPI, OIDC/RBAC interfaces, and asynchronous-job skeletons.
+- Remove the old CLI command and Cobra-oriented sub-plan.
 
-### Phase 0 — contract fixtures and migration skeleton
+Gate: the renamed binary starts a side-effect-free authenticated API skeleton, health/readiness and OpenAPI contracts test, and public Kibana contracts remain documented.
 
-Detailed sub-plan: `docs/implementation/subplans/phase-0-contract-fixtures-and-migration-skeleton.md`
+### Phase 1 — mounted inputs, resource sets, and validation API
 
-- Confirm documented request/response contracts against Kibana 9.2.0 and the current selected 9.x patch.
-- Capture sanitized `httptest` fixtures for every adapter and pagination style.
-- Rename the command/module packages and remove prototype-only behavior.
-- Add build tooling and version metadata.
+Detailed sub-plan: `docs/implementation/subplans/phase-1-mounted-inputs-resource-sets-and-validation-api.md`
 
-Gate: exact public endpoints, caller-defined ID support, required privileges, and canonical fields are documented for all five kinds before adapter implementation proceeds.
+- Implement mounted server config, target/resource-set assignment, strict manifests, selectors/references, source snapshots/digests, and validation jobs/API/UI.
 
-### Phase 1 — strict inputs and validation
+Gate: invalid mounted inputs fail with actionable diagnostics; valid assigned resource sets produce deterministic target inventories/digests without Kibana credentials.
 
-Detailed sub-plan: `docs/implementation/subplans/phase-1-strict-inputs-and-validation.md`
+### Phase 2 — OIDC, Kubernetes Secrets, Kibana reads, and inventory API
 
-- Implement target config, manifest envelopes, resource schemas, selectors, references, dependency cycle checks, and canonical input digests.
-- Add examples and `validate`.
+Detailed sub-plan: `docs/implementation/subplans/phase-2-oidc-kubernetes-secrets-kibana-reads-and-inventory-api.md`
 
-Gate: malformed, ambiguous, duplicate, dangling, cross-selector, and secret-bearing inputs fail locally with actionable diagnostics.
+- Complete OIDC/RBAC, credential upload/rotation to owned Secrets, Kibana TLS/version/pagination/read adapters, and target/resource inventory APIs.
 
-### Phase 2 — API client and read adapters
+Gate: authenticated roles and Secret ownership controls pass; every kind reads through public APIs in both spaces/versions without secret leakage.
 
-Detailed sub-plan: `docs/implementation/subplans/phase-2-api-client-and-read-adapters.md`
+### Phase 3 — PVC state, diff, plans, and planning API
 
-- Implement spaces, authentication, TLS/CA, version checks, pagination, error classes, and canonical live-resource projections.
-- Implement read/status methods for all kinds.
+Detailed sub-plan: `docs/implementation/subplans/phase-3-pvc-state-diff-plans-and-planning-api.md`
 
-Gate: contract tests pass for both supported live versions and no single-page assumption remains.
+- Implement file state, jobs, audit, inventory/journals, ownership, DAG/diff, saved plans, planning API, and plan-review UI.
 
-### Phase 3 — inventory, diff, and saved plans
+Gate: deterministic non-secret plans are source/target scoped and cannot authorize prune without inventory plus marker.
 
-Detailed sub-plan: `docs/implementation/subplans/phase-3-inventory-diff-and-saved-plans.md`
+### Phase 4 — apply engine and apply API
 
-- Implement file state, locks, journals, ownership rules, pruning authority, dependency DAG, per-target planning, deterministic plan JSON, and CLI review output.
+Detailed sub-plan: `docs/implementation/subplans/phase-4-apply-engine-and-apply-api.md`
 
-Gate: converged plans contain zero operations; unmanaged or marker-only resources cannot produce deletes.
+- Implement preflight, mutation adapters, post-verification, dependency/target isolation, reports, idempotent initiation, and explicit replan semantics.
 
-### Phase 4 — apply
+Gate: safety/fault/partial-failure tests pass and reports/audit remain accurate and non-secret.
 
-Detailed sub-plan: `docs/implementation/subplans/phase-4-apply.md`
+### Phase 5 — web-first operator experience and API hardening
 
-- Implement preflight validation, baseline checks, mutation adapters, post-state verification, inventory/journal updates, dependency skips, partial-target continuation, reports, and exit codes.
+Detailed sub-plan: `docs/implementation/subplans/phase-5-web-first-operator-experience-and-api-hardening.md`
 
-Gate: every safety and partial-failure acceptance test passes with fault injection around each remote/state write boundary.
+- Complete embedded UI workflows, external API usability/OpenAPI parity, OIDC sessions, CSRF/CORS/proxy/security headers, accessibility, concurrency, and audit views.
 
-### Phase 5 — web interface
+Gate: all operator workflows are web-complete and external automation can use the same secured versioned API.
 
-Detailed sub-plan: `docs/implementation/subplans/phase-5-web-interface.md`
+### Phase 6 — container, Kubernetes exposure, and live matrix
 
-- Implement embedded assets and the loopback API over shared services.
-- Add browser/API tests for validation, planning, apply reporting, CSRF/origin/host enforcement, concurrency, and redaction.
+Detailed sub-plan: `docs/implementation/subplans/phase-6-container-kubernetes-exposure-and-live-matrix.md`
 
-Gate: every operator-relevant CLI outcome has equivalent visibility in the web interface without exposing credentials or internal-only data.
+- Finalize image, Deployment/Service/Ingress/PVC/RBAC/NetworkPolicy, branch-separated mount examples, local Docker launcher, and live 9.2.0/current-9.x matrix.
 
-### Phase 6 — container, Kubernetes, and live matrix
+Gate: the one-replica web/API deployment and both live versions pass the full security/reconciliation acceptance matrix.
 
-Detailed sub-plan: `docs/implementation/subplans/phase-6-container-kubernetes-and-live-matrix.md`
+Implement incrementally on local branches. Require captain approval before guarded integration into `main`. Do not push, publish, deploy, or contact third parties without explicit approval.
 
-- Finalize the Docker image, Kubernetes planner/applier Jobs, PVC workflow, security contexts, operator guide, and local Docker test launcher.
-- Run end-to-end tests against Kibana 9.2.0 and the current selected 9.x patch (initially 9.4.2 unless a newer stable 9.x release is current when implementation begins).
+## 20. Test strategy
 
-Gate: workstation, container, and Kubernetes Job workflows all produce, review, apply, and persist the same plan/report formats.
+### Unit/property tests
 
-Implement in incremental local branches. Require captain approval before guarded fast-forward integration into `main`. Do not push, publish images, deploy, or contact third parties without explicit approval.
+- Mounted config/manifests, duplicate keys, traversal/symlinks, selectors, references, DAGs, canonicalization, digests.
+- OIDC claims/roles/session/CSRF, API schemas/errors/pagination/idempotency.
+- Kubernetes Secret ownership, PEM/API-key validation, no-overwrite/delete, and redaction.
+- Kibana adapters, pagination, canonicalization, version handling, ownership, pruning, plans, locks, journals, audit, reports.
 
-## 18. Test strategy
+### HTTP/API tests
 
-### Unit tests
+- Authentication/authorization matrix for every endpoint.
+- Browser cookie/CSRF/origin and bearer-token behavior.
+- Proxy/Host/proto handling, body/response limits, safe errors, OpenAPI-handler parity.
+- Credential upload never echoed/cached/logged/persisted to PVC.
+- Asynchronous jobs survive disconnect/restart and enforce mutation serialization.
 
-- Strict YAML decoding, duplicate keys, unknown fields, multi-document input, traversal/symlink rejection.
-- Target selectors, stable identity, duplicate/collision handling, references, DAG cycles, and deterministic ordering.
-- Resource schemas, exact version validation, canonicalization, default/set ordering, and fingerprints.
-- Diffing, ownership conflicts, inventory-only pruning, safe orphan behavior, and collective prebuilt semantics.
-- Per-target input digests, CA changes, source relocation behavior, plan schema validation, and operation-to-current-desired verification.
-- State locking, atomic writes, corruption handling, and every journal recovery branch.
-- Secret redaction and report formatting.
+### Reconciliation tests
 
-### HTTP contract tests
+- Second plan after successful apply has zero operations.
+- Mounted source/config/CA Secret/inventory/version/live drift rejects affected target.
+- Unrelated resource sets/targets continue independently.
+- Unmanaged and marker-only resources are never changed/deleted.
+- Dependency failures skip only transitive dependants.
+- Partial apply persists report/audit and requires new plan.
+- Prebuilt rules remain collective.
 
-Use `httptest` for:
+### Live matrix
 
-- API-key headers and redaction;
-- default and non-default Kibana spaces;
-- every pagination style and boundary;
-- caller-defined ID create/read/update/delete behavior;
-- complete detection-rule updates;
-- EPM exact-version install and unsupported downgrade conflict;
-- collective prebuilt status/install/update;
-- 401/403/404/409/429/5xx, timeouts, malformed/oversized responses, redirect rejection, and revision drift;
-- per-operation post-state verification.
+- Exact Kibana 9.2.0 and selected current stable 9.x patch, initially 9.4.2.
+- Default/non-default spaces, caller IDs, pagination, privileges, conflicts, API-key behavior, collective prebuilt operations, and TLS CA trust.
+- Record exact image versions/digests and sanitized evidence.
 
-### Reconciliation and failure tests
+## 21. Acceptance criteria
 
-- A second plan after successful apply has zero operations.
-- Mutated selected configuration, manifests, CA content, inventory, or remote state rejects the affected target before mutation.
-- An unrelated target or non-applicable manifest edit does not invalidate another target.
-- Unmanaged and marker-only resources are never modified or deleted.
-- Missing/altered ownership markers are conflicts, never deletes.
-- One failing target does not block unrelated targets.
-- A failed operation skips only its transitive dependants.
-- A partial apply writes an accurate report and requires a new plan.
-- Crash injection before/after remote mutation and state writes recovers safely or stops with a conflict.
-- Plans, reports, inventory, journals, logs, and web responses contain no sentinel API keys.
-- Prebuilt rules install/update collectively and are never individually pruned.
-
-### Live compatibility matrix
-
-Run integration tests against:
-
-- Kibana 9.2.0, the oldest supported release; and
-- the current stable 9.x patch selected at implementation/release time, initially 9.4.2.
-
-Pin exact image versions in test configuration and record the tested matrix in release output. Any discovered contract difference must be assessed for CLI, web, plan/report schema, canonicalization, operator documentation, and Kubernetes impact before compatibility is claimed.
-
-## 19. Acceptance criteria
-
-The v1 implementation is complete when:
-
-- The old prototype interface and JSON format have been replaced and repository documentation is consistent.
-- All commands and the loopback web interface reuse one reconciler and safety model.
-- All five supported kinds work through documented public APIs in default and non-default spaces.
-- A successful apply followed by a new plan is converged with zero operations.
-- Selected desired-input, CA, inventory, version, or remote-baseline drift blocks mutation for the affected target.
-- Unrelated target changes do not block safe independent targets.
-- No resource is pruned without both exact durable inventory authority and a live ownership marker.
-- Dependency failures skip only downstream resources and independent targets continue.
-- Partial apply is accurately reported, never rolled back, and can proceed only through an explicit new plan.
-- No API key appears in plans, reports, state, journals, logs, browser responses, container layers, or Kubernetes ConfigMaps.
-- Prebuilt rules are installed/updated only as a complete package and never individually pruned.
-- The web interface accurately represents validation, drift, ownership, dependency, rejection, partial failure, and apply outcomes.
-- The Docker image runs as non-root, Kubernetes planner/applier Jobs use mounted Secrets and persistent plan/state storage, and `start-web.sh` remains clearly local-test-only.
-- Unit, contract, reconciliation, security, container, Kubernetes workflow, and live-version matrix tests pass.
+- Production runs as a single-replica OIDC-protected Kubernetes web/API Deployment, not an operator CLI or Job workflow.
+- Mounted Git/YAML resource sets remain authoritative and are never edited by the service.
+- Every target is visibly assigned to one resource set; branch/revision provenance and canonical digest are displayed.
+- Administrators can upload/rotate API keys and CA trust bundles into owned Kubernetes Secrets without values entering PVC state, logs, audit, responses, or browser storage.
+- Viewer/planner/applier/administrator authorization is enforced and audited.
+- Embedded UI and external clients use the same `/api/v1` OpenAPI-described API.
+- All five resource kinds work through documented APIs in default/non-default spaces.
+- Source, credential presence, CA, inventory, version, or live-baseline drift blocks affected-target mutation.
+- No prune occurs without exact inventory plus live marker.
+- Independent targets/resources continue after failures; no rollback/resume occurs.
+- New plans are required after apply outcomes.
+- JSON/PVC state is atomic, non-secret, recoverable, and explicitly single-writer/single-replica.
+- Container/Kubernetes security, OIDC/API security, secret provisioning, reconciliation, web, and live-version tests pass.

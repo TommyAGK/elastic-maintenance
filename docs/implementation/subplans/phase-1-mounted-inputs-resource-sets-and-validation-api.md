@@ -1,0 +1,101 @@
+# Phase 1 — mounted inputs, resource sets, and validation API
+
+## Objective
+
+Implement authoritative read-only mounted configuration/resource sets and expose deterministic validation/inventory through asynchronous API jobs.
+
+## Prerequisites
+
+- Phase 0 server/API skeleton passes.
+- Mounted configuration and resource-set schemas in `plan.md` are approved.
+
+## Substeps
+
+### 1.1 Implement strict server/target configuration
+
+1. Decode strict YAML with duplicate-key and unknown-field rejection.
+2. Validate `stateID`, `publicURL`, OIDC references, resource sets, targets, labels, URL/space, Secret namespace/name, and role mappings.
+3. Normalize target identities and HTTPS/loopback rules.
+4. Restrict resource-set paths to configured mount roots.
+5. Restrict credential Secret names/namespaces to configured policy.
+6. Keep configuration read-only.
+
+### 1.2 Discover resource-set files safely
+
+1. Resolve each assigned root once.
+2. Walk `.yaml`/`.yml` recursively in lexical order.
+3. Reject symlinks, traversal, special files, root escapes, and unreadable files.
+4. Read optional revision metadata as untrusted display text with strict size limits.
+5. Retain file/document locations for diagnostics.
+6. Never execute hooks or Git commands.
+
+### 1.3 Decode strict resource envelopes
+
+1. Implement versioned envelope, identity, selector, and dependency fields.
+2. Support multi-document YAML.
+3. Enforce `(kind,id)` uniqueness per resource set.
+4. Add strict schemas for all five kinds.
+5. Reject credential fields, unsupported rule variants, `latest`/ranges, and multiple applicable prebuilt resources.
+6. Preserve source locations through typed decoding.
+
+### 1.4 Resolve assignments and selectors
+
+1. Assign each target to exactly one resource set.
+2. Evaluate target labels only among targets assigned to that set.
+3. Treat omitted selector as all assigned targets.
+4. Reject selector results/references inconsistent across target applicability.
+5. Build deterministic target/resource inventory.
+6. Display resource-set ID, optional external revision, and digest per target.
+
+### 1.5 Resolve references and DAGs
+
+1. Parse `<Kind>/<id>` references.
+2. Add automatic package-policy edges.
+3. Resolve explicit dependencies.
+4. Reject dangling, self, duplicate, cross-selector, and cyclic references.
+5. Produce stable per-target DAGs for planning.
+
+### 1.6 Canonicalize and snapshot sources
+
+1. Canonicalize typed config/resources.
+2. Compute per-resource-set and per-target desired digests.
+3. Include assigned target config and source contents, not unrelated mounts.
+4. Store source-file hashes and revision metadata for diagnostics.
+5. Treat whitespace-equivalent canonical resources consistently.
+6. Never copy authoritative resource files into writable state as a new source of truth.
+
+### 1.7 Implement validation job execution
+
+1. Add durable-compatible validation job service behind an in-memory/file abstraction.
+2. Re-read mounted inputs when the job begins.
+3. Produce structured diagnostics, counts, assignments, source metadata, and digests.
+4. Require planner or administrator permission to initiate; viewers may inspect results.
+5. Do not require target credentials or contact Kibana.
+6. Bound job concurrency and cancellation.
+
+### 1.8 Implement source/target validation API
+
+1. Implement source and target list/detail endpoints.
+2. Implement validation creation/status endpoints with idempotency keys.
+3. Paginate large resource/diagnostic lists.
+4. Use safe source paths relative to configured roots where possible.
+5. Return no environment data or credential values.
+6. Update OpenAPI and examples with handler-parity tests.
+
+### 1.9 Add initial web views
+
+1. Show mounted source sets, target assignments, revision metadata, and digests.
+2. Start validation jobs and show progress/results.
+3. Show source-located diagnostics.
+4. Make all resource/config views read-only and explain external GitOps ownership.
+5. Do not add resource-edit controls.
+
+## Verification
+
+- Unit/property tests cover strict YAML, duplicate keys, traversal/symlinks, schemas, assignments, selectors, references, DAGs, and digests.
+- API tests cover role checks, idempotency, pagination, safe diagnostics, and OpenAPI parity.
+- Validation succeeds without Kubernetes/Kibana credentials or network access.
+
+## Phase gate
+
+Invalid mounts fail safely with actionable diagnostics. Valid mounts yield deterministic source/target/resource inventories and digests, and the API/UI cannot alter authoritative configuration or resources.
