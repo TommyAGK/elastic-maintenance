@@ -17,6 +17,7 @@ var (
 	ErrCancellationUnsupported = errors.New("job cancellation is not supported")
 
 	digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	jobIDPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	codePattern   = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 )
 
@@ -58,7 +59,7 @@ func (job Job) Terminal() bool {
 }
 
 func (job Job) Validate() error {
-	if !codePattern.MatchString(job.ID) {
+	if !jobIDPattern.MatchString(job.ID) {
 		return errors.New("job ID is invalid")
 	}
 	if !job.Type.Valid() {

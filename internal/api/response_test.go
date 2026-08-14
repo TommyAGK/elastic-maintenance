@@ -19,7 +19,7 @@ func TestWriteError(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Error.Code != "authentication_required" || envelope.Error.Message != "authentication is required" || envelope.Error.RequestID != "request-1" {
+	if envelope.APIVersion != Version || envelope.Error.Code != "authentication_required" || envelope.Error.Message != "authentication is required" || envelope.Error.RequestID != "request-1" {
 		t.Fatalf("envelope = %#v", envelope)
 	}
 }

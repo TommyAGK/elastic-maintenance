@@ -23,10 +23,12 @@ type ApplyCreateRequest struct {
 }
 
 type JobAcceptedResponse struct {
-	Job jobs.Job `json:"job"`
+	APIVersion string   `json:"apiVersion"`
+	Job        jobs.Job `json:"job"`
 }
 
 type JobListResponse struct {
+	APIVersion    string     `json:"apiVersion"`
 	Jobs          []jobs.Job `json:"jobs"`
 	NextPageToken string     `json:"nextPageToken,omitempty"`
 }

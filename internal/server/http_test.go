@@ -91,16 +91,11 @@ func TestAuthenticatedSessionAndProtectedRouting(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
-	var session struct {
-		Authenticated bool        `json:"authenticated"`
-		Subject       string      `json:"subject"`
-		DisplayName   string      `json:"displayName"`
-		Roles         []auth.Role `json:"roles"`
-	}
+	var session api.SessionResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil {
 		t.Fatal(err)
 	}
-	if !session.Authenticated || session.Subject != "operator-1" || session.DisplayName != "Operator" || len(session.Roles) != 2 || session.Roles[0] != auth.RolePlanner || session.Roles[1] != auth.RoleViewer {
+	if session.APIVersion != api.Version || !session.Authenticated || session.Actor.Subject != "operator-1" || session.Actor.DisplayName != "Operator" || len(session.Actor.Roles) != 2 || session.Actor.Roles[0] != auth.RolePlanner || session.Actor.Roles[1] != auth.RoleViewer {
 		t.Fatalf("session = %#v", session)
 	}
 
@@ -157,7 +152,7 @@ func TestMutationJobPlaceholdersEnforceRoleAndRequestContract(t *testing.T) {
 		"planner cannot apply": {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/plans/plan-1/apply", contentType: "application/json", key: "apply-request-1", wantStatus: http.StatusForbidden, wantCode: "permission_denied"},
 		"missing key":          {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/plans", contentType: "application/json", wantStatus: http.StatusBadRequest, wantCode: "invalid_idempotency_key"},
 		"wrong content type":   {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/plans", contentType: "text/plain", key: "plan-request-1", wantStatus: http.StatusUnsupportedMediaType, wantCode: "json_required"},
-		"wrong method":         {roles: []auth.Role{auth.RolePlanner}, method: http.MethodGet, path: "/api/v1/plans", contentType: "application/json", key: "plan-request-1", wantStatus: http.StatusMethodNotAllowed, wantCode: "method_not_allowed"},
+		"wrong method":         {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPatch, path: "/api/v1/plans", contentType: "application/json", key: "plan-request-1", wantStatus: http.StatusMethodNotAllowed, wantCode: "method_not_allowed"},
 		"unknown plan path":    {roles: []auth.Role{auth.RoleApplier}, method: http.MethodPost, path: "/api/v1/plans/plan-1/resume", contentType: "application/json", key: "apply-request-1", wantStatus: http.StatusNotFound, wantCode: "not_found"},
 	} {
 		t.Run(name, func(t *testing.T) {

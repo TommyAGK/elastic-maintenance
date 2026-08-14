@@ -159,9 +159,19 @@ func NewHandler(options HandlerOptions) http.Handler {
 
 	protectedMux := http.NewServeMux()
 	protectedMux.Handle("/api/v1/session", authorize(authorizer, auth.PermissionSessionRead, http.HandlerFunc(sessionHandler)))
-	protectedMux.Handle("/api/v1/validations", authorize(authorizer, auth.PermissionValidationsCreate, mutationJobPlaceholder("validation")))
-	protectedMux.Handle("/api/v1/plans", authorize(authorizer, auth.PermissionPlansCreate, mutationJobPlaceholder("plan")))
+	protectedMux.Handle("/api/v1/sources", authorize(authorizer, auth.PermissionSourcesRead, readPlaceholder("source inventory")))
+	protectedMux.Handle("/api/v1/sources/", detailReadHandler("/api/v1/sources/", authorizer, auth.PermissionSourcesRead, "source inventory"))
+	protectedMux.Handle("/api/v1/targets", authorize(authorizer, auth.PermissionTargetsRead, readPlaceholder("target inventory")))
+	protectedMux.Handle("/api/v1/targets/", targetSubresourceHandler(authorizer))
+	protectedMux.Handle("/api/v1/validations", jobCollectionHandler(authorizer, auth.PermissionValidationsRead, auth.PermissionValidationsCreate, "validation"))
+	protectedMux.Handle("/api/v1/validations/", detailReadHandler("/api/v1/validations/", authorizer, auth.PermissionValidationsRead, "validation job"))
+	protectedMux.Handle("/api/v1/plans", jobCollectionHandler(authorizer, auth.PermissionPlansRead, auth.PermissionPlansCreate, "plan"))
 	protectedMux.Handle("/api/v1/plans/", planSubresourceHandler(authorizer))
+	protectedMux.Handle("/api/v1/jobs", authorize(authorizer, auth.PermissionJobsRead, readPlaceholder("job inventory")))
+	protectedMux.Handle("/api/v1/jobs/", detailReadHandler("/api/v1/jobs/", authorizer, auth.PermissionJobsRead, "job"))
+	protectedMux.Handle("/api/v1/reports", authorize(authorizer, auth.PermissionReportsRead, readPlaceholder("report inventory")))
+	protectedMux.Handle("/api/v1/reports/", detailReadHandler("/api/v1/reports/", authorizer, auth.PermissionReportsRead, "report"))
+	protectedMux.Handle("/api/v1/audit", authorize(authorizer, auth.PermissionAuditRead, readPlaceholder("audit inventory")))
 	protectedMux.HandleFunc("/api/v1", protectedNotFound)
 	protectedMux.HandleFunc("/api/v1/", protectedNotFound)
 	protectedAPI := authenticate(authenticator, protectedMux)
@@ -191,11 +201,10 @@ func sessionHandler(w http.ResponseWriter, request *http.Request) {
 		api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
 		return
 	}
-	api.WriteJSON(w, request, http.StatusOK, map[string]any{
-		"authenticated": true,
-		"subject":       actor.Subject,
-		"displayName":   actor.DisplayName,
-		"roles":         actor.Roles,
+	api.WriteJSON(w, request, http.StatusOK, api.SessionResponse{
+		APIVersion:    api.Version,
+		Authenticated: true,
+		Actor:         actor,
 	})
 }
 
@@ -203,9 +212,22 @@ func protectedNotFound(w http.ResponseWriter, request *http.Request) {
 	api.WriteError(w, request, http.StatusNotFound, "not_found", "route not found", RequestID(request.Context()))
 }
 
-func mutationJobPlaceholder(jobType string) http.Handler {
+func readPlaceholder(resource string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if !allowMethods(w, request, http.MethodPost) {
+		if !allowMethods(w, request, http.MethodGet, http.MethodHead) {
+			return
+		}
+		api.WriteError(w, request, http.StatusNotImplemented, "endpoint_not_implemented", resource+" endpoint is not implemented yet", RequestID(request.Context()))
+	})
+}
+
+func mutationJobPlaceholder(jobType string) http.Handler {
+	return jsonMutationPlaceholder(http.MethodPost, "job_execution_not_implemented", jobType+" job execution is not implemented yet")
+}
+
+func jsonMutationPlaceholder(method, code, message string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !allowMethods(w, request, method) {
 			return
 		}
 		mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -217,7 +239,61 @@ func mutationJobPlaceholder(jobType string) http.Handler {
 			api.WriteError(w, request, http.StatusBadRequest, "invalid_idempotency_key", "a valid Idempotency-Key header is required", RequestID(request.Context()))
 			return
 		}
-		api.WriteError(w, request, http.StatusNotImplemented, "job_execution_not_implemented", jobType+" job execution is not implemented yet", RequestID(request.Context()))
+		api.WriteError(w, request, http.StatusNotImplemented, code, message, RequestID(request.Context()))
+	})
+}
+
+func jobCollectionHandler(authorizer auth.Authorizer, readPermission, createPermission auth.Permission, jobType string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodGet, http.MethodHead:
+			authorize(authorizer, readPermission, readPlaceholder(jobType+" job inventory")).ServeHTTP(w, request)
+		case http.MethodPost:
+			authorize(authorizer, createPermission, mutationJobPlaceholder(jobType)).ServeHTTP(w, request)
+		default:
+			allowMethods(w, request, http.MethodGet, http.MethodHead, http.MethodPost)
+		}
+	})
+}
+
+func detailReadHandler(prefix string, authorizer auth.Authorizer, permission auth.Permission, resource string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		identifier := strings.TrimPrefix(request.URL.Path, prefix)
+		if !requestIDPattern.MatchString(identifier) {
+			protectedNotFound(w, request)
+			return
+		}
+		authorize(authorizer, permission, readPlaceholder(resource)).ServeHTTP(w, request)
+	})
+}
+
+func targetSubresourceHandler(authorizer auth.Authorizer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/targets/")
+		parts := strings.Split(remainder, "/")
+		if len(parts) == 1 && requestIDPattern.MatchString(parts[0]) {
+			authorize(authorizer, auth.PermissionTargetsRead, readPlaceholder("target inventory")).ServeHTTP(w, request)
+			return
+		}
+		if len(parts) != 2 || !requestIDPattern.MatchString(parts[0]) {
+			protectedNotFound(w, request)
+			return
+		}
+		switch parts[1] {
+		case "credential-status":
+			authorize(authorizer, auth.PermissionCredentialsRead, readPlaceholder("credential status")).ServeHTTP(w, request)
+		case "credentials":
+			switch request.Method {
+			case http.MethodPut:
+				authorize(authorizer, auth.PermissionCredentialsWrite, jsonMutationPlaceholder(http.MethodPut, "endpoint_not_implemented", "credential upload is not implemented yet")).ServeHTTP(w, request)
+			case http.MethodDelete:
+				authorize(authorizer, auth.PermissionCredentialsWrite, jsonMutationPlaceholder(http.MethodDelete, "endpoint_not_implemented", "credential deletion is not implemented yet")).ServeHTTP(w, request)
+			default:
+				allowMethods(w, request, http.MethodPut, http.MethodDelete)
+			}
+		default:
+			protectedNotFound(w, request)
+		}
 	})
 }
 
@@ -225,6 +301,10 @@ func planSubresourceHandler(authorizer auth.Authorizer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/plans/")
 		parts := strings.Split(remainder, "/")
+		if len(parts) == 1 && requestIDPattern.MatchString(parts[0]) {
+			authorize(authorizer, auth.PermissionPlansRead, readPlaceholder("plan")).ServeHTTP(w, request)
+			return
+		}
 		if len(parts) != 2 || !requestIDPattern.MatchString(parts[0]) || parts[1] != "apply" {
 			protectedNotFound(w, request)
 			return

@@ -3,45 +3,54 @@
   "info": {
     "title": "Elastic Maintainer API",
     "version": "v1alpha1",
-    "description": "Initial web-first API server skeleton. Domain operations are added incrementally behind /api/v1."
+    "description": "Initial web-first API contract. Endpoints marked with 501 responses are registered skeletons whose domain execution lands in later phases."
   },
+  "security": [
+    {"sessionCookie": []},
+    {"bearerAuth": []}
+  ],
   "paths": {
     "/health/live": {
       "get": {
         "operationId": "getLiveness",
+        "security": [],
         "responses": {"200": {"description": "Process is live"}}
       }
     },
     "/health/ready": {
       "get": {
         "operationId": "getReadiness",
+        "security": [],
         "responses": {
           "200": {"description": "Process is ready"},
-          "503": {"description": "Process is not ready"}
+          "503": {"$ref": "#/components/responses/APIError"}
         }
       }
     },
     "/auth/login": {
       "get": {
         "operationId": "beginOIDCLogin",
-        "responses": {"501": {"description": "OIDC is not implemented in the skeleton"}}
+        "security": [],
+        "responses": {"501": {"$ref": "#/components/responses/NotImplemented"}}
       }
     },
     "/auth/callback": {
       "get": {
         "operationId": "completeOIDCCallback",
-        "responses": {"501": {"description": "OIDC is not implemented in the skeleton"}}
+        "security": [],
+        "responses": {"501": {"$ref": "#/components/responses/NotImplemented"}}
       }
     },
     "/auth/logout": {
       "post": {
         "operationId": "logout",
-        "responses": {"501": {"description": "OIDC is not implemented in the skeleton"}}
+        "responses": {"501": {"$ref": "#/components/responses/NotImplemented"}}
       }
     },
     "/api/v1/openapi.json": {
       "get": {
         "operationId": "getOpenAPI",
+        "security": [],
         "responses": {"200": {"description": "OpenAPI document"}}
       }
     },
@@ -51,46 +60,146 @@
         "responses": {
           "200": {
             "description": "Authenticated actor and roles",
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SessionResponse"}}}
           },
-          "401": {"description": "Authentication is required"},
-          "403": {"description": "Permission is denied"}
+          "401": {"$ref": "#/components/responses/AuthenticationRequired"},
+          "403": {"$ref": "#/components/responses/PermissionDenied"}
+        }
+      }
+    },
+    "/api/v1/sources": {
+      "get": {
+        "operationId": "listSources",
+        "responses": {
+          "200": {"description": "Mounted source inventory", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SourceListResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/sources/{sourceId}": {
+      "get": {
+        "operationId": "getSource",
+        "parameters": [{"$ref": "#/components/parameters/SourceID"}],
+        "responses": {
+          "200": {"description": "Mounted source", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SourceResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/targets": {
+      "get": {
+        "operationId": "listTargets",
+        "responses": {
+          "200": {"description": "Target inventory", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TargetListResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/targets/{targetId}": {
+      "get": {
+        "operationId": "getTarget",
+        "parameters": [{"$ref": "#/components/parameters/TargetID"}],
+        "responses": {
+          "200": {"description": "Target inventory item", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TargetResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/targets/{targetId}/credential-status": {
+      "get": {
+        "operationId": "getTargetCredentialStatus",
+        "parameters": [{"$ref": "#/components/parameters/TargetID"}],
+        "responses": {
+          "200": {"description": "Non-secret credential status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatusResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/targets/{targetId}/credentials": {
+      "put": {
+        "operationId": "putTargetCredentials",
+        "parameters": [
+          {"$ref": "#/components/parameters/TargetID"},
+          {"$ref": "#/components/parameters/IdempotencyKey"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialPutRequest"}}}
+        },
+        "responses": {
+          "200": {"description": "Credential metadata", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatusResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      },
+      "delete": {
+        "operationId": "deleteTargetCredentials",
+        "parameters": [
+          {"$ref": "#/components/parameters/TargetID"},
+          {"$ref": "#/components/parameters/IdempotencyKey"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfirmedMutationRequest"}}}
+        },
+        "responses": {
+          "200": {"description": "Credential metadata", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CredentialStatusResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
         }
       }
     },
     "/api/v1/validations": {
+      "get": {
+        "operationId": "listValidationJobs",
+        "responses": {
+          "200": {"description": "Validation jobs", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobListResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      },
       "post": {
         "operationId": "createValidationJob",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
-        "requestBody": {
-          "required": true,
-          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ValidationCreateRequest"}}}
-        },
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ValidationCreateRequest"}}}},
         "responses": {
           "202": {"$ref": "#/components/responses/JobAccepted"},
-          "400": {"description": "Invalid idempotency key"},
-          "401": {"description": "Authentication is required"},
-          "403": {"description": "Permission is denied"},
-          "415": {"description": "JSON content type is required"},
-          "501": {"description": "Validation execution is not implemented in the skeleton"}
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/validations/{jobId}": {
+      "get": {
+        "operationId": "getValidationJob",
+        "parameters": [{"$ref": "#/components/parameters/JobID"}],
+        "responses": {
+          "200": {"description": "Validation job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
         }
       }
     },
     "/api/v1/plans": {
+      "get": {
+        "operationId": "listPlans",
+        "responses": {
+          "200": {"description": "Saved plans", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlanListResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      },
       "post": {
         "operationId": "createPlanJob",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
-        "requestBody": {
-          "required": true,
-          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlanCreateRequest"}}}
-        },
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlanCreateRequest"}}}},
         "responses": {
           "202": {"$ref": "#/components/responses/JobAccepted"},
-          "400": {"description": "Invalid idempotency key"},
-          "401": {"description": "Authentication is required"},
-          "403": {"description": "Permission is denied"},
-          "415": {"description": "JSON content type is required"},
-          "501": {"description": "Plan execution is not implemented in the skeleton"}
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/plans/{planId}": {
+      "get": {
+        "operationId": "getPlan",
+        "parameters": [{"$ref": "#/components/parameters/PlanID"}],
+        "responses": {
+          "200": {"description": "Saved plan", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlanResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
         }
       }
     },
@@ -98,80 +207,186 @@
       "post": {
         "operationId": "createApplyJob",
         "parameters": [
-          {"name": "planId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"$ref": "#/components/parameters/PlanID"},
           {"$ref": "#/components/parameters/IdempotencyKey"}
         ],
-        "requestBody": {
-          "required": true,
-          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApplyCreateRequest"}}}
-        },
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfirmedMutationRequest"}}}},
         "responses": {
           "202": {"$ref": "#/components/responses/JobAccepted"},
-          "400": {"description": "Invalid idempotency key"},
-          "401": {"description": "Authentication is required"},
-          "403": {"description": "Permission is denied"},
-          "415": {"description": "JSON content type is required"},
-          "501": {"description": "Apply execution is not implemented in the skeleton"}
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "operationId": "listJobs",
+        "responses": {
+          "200": {"description": "Jobs", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobListResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/jobs/{jobId}": {
+      "get": {
+        "operationId": "getJob",
+        "parameters": [{"$ref": "#/components/parameters/JobID"}],
+        "responses": {
+          "200": {"description": "Job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/reports": {
+      "get": {
+        "operationId": "listReports",
+        "responses": {
+          "200": {"description": "Apply reports", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ReportListResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/reports/{reportId}": {
+      "get": {
+        "operationId": "getReport",
+        "parameters": [{"$ref": "#/components/parameters/ReportID"}],
+        "responses": {
+          "200": {"description": "Apply report", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ReportResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
+        }
+      }
+    },
+    "/api/v1/audit": {
+      "get": {
+        "operationId": "listAuditEvents",
+        "responses": {
+          "200": {"description": "Audit events", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AuditListResponse"}}}},
+          "501": {"$ref": "#/components/responses/NotImplemented"}
         }
       }
     }
   },
   "components": {
+    "securitySchemes": {
+      "sessionCookie": {"type": "apiKey", "in": "cookie", "name": "__Host-elastic-maintainer"},
+      "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}
+    },
     "parameters": {
-      "IdempotencyKey": {
-        "name": "Idempotency-Key",
-        "in": "header",
-        "required": true,
-        "schema": {"type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"}
-      }
+      "IdempotencyKey": {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"}},
+      "SourceID": {"name": "sourceId", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/SafeID"}},
+      "TargetID": {"name": "targetId", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/SafeID"}},
+      "JobID": {"name": "jobId", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/SafeID"}},
+      "PlanID": {"name": "planId", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/SafeID"}},
+      "ReportID": {"name": "reportId", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/SafeID"}}
     },
     "responses": {
-      "JobAccepted": {
-        "description": "Job accepted",
-        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobAcceptedResponse"}}}
-      }
+      "APIError": {"description": "API error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+      "AuthenticationRequired": {"description": "Authentication is required", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+      "PermissionDenied": {"description": "Permission is denied", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+      "NotImplemented": {"description": "Endpoint contract is registered but domain execution is not implemented", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+      "JobAccepted": {"description": "Job accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobAcceptedResponse"}}}}
     },
     "schemas": {
-      "Session": {
+      "APIVersion": {"type": "string", "enum": ["elastic-maintainer/v1alpha1"]},
+      "SafeID": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$"},
+      "Actor": {
         "type": "object",
-        "required": ["authenticated", "subject", "roles"],
+        "additionalProperties": false,
+        "required": ["subject", "roles"],
         "properties": {
-          "authenticated": {"type": "boolean", "enum": [true]},
           "subject": {"type": "string"},
           "displayName": {"type": "string"},
-          "roles": {
-            "type": "array",
-            "items": {"type": "string", "enum": ["viewer", "planner", "applier", "administrator"]}
-          }
+          "roles": {"type": "array", "items": {"type": "string", "enum": ["viewer", "planner", "applier", "administrator"]}, "uniqueItems": true}
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["apiVersion", "authenticated", "actor"],
+        "properties": {
+          "apiVersion": {"$ref": "#/components/schemas/APIVersion"},
+          "authenticated": {"type": "boolean", "enum": [true]},
+          "actor": {"$ref": "#/components/schemas/Actor"}
         }
       },
       "ValidationCreateRequest": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "resourceSetIds": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-          "targetIds": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+          "resourceSetIds": {"type": "array", "items": {"$ref": "#/components/schemas/SafeID"}, "uniqueItems": true},
+          "targetIds": {"type": "array", "items": {"$ref": "#/components/schemas/SafeID"}, "uniqueItems": true}
         }
       },
       "PlanCreateRequest": {
         "type": "object",
         "additionalProperties": false,
         "required": ["targetIds"],
-        "properties": {
-          "targetIds": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true}
-        }
+        "properties": {"targetIds": {"type": "array", "items": {"$ref": "#/components/schemas/SafeID"}, "minItems": 1, "uniqueItems": true}}
       },
-      "ApplyCreateRequest": {
+      "ConfirmedMutationRequest": {
         "type": "object",
         "additionalProperties": false,
         "required": ["confirm"],
         "properties": {"confirm": {"type": "boolean", "enum": [true]}}
       },
+      "CredentialPutRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["apiKey"],
+        "properties": {
+          "apiKey": {"type": "string", "minLength": 1, "maxLength": 16384, "writeOnly": true, "format": "password"},
+          "caCertificatePem": {"type": "string", "maxLength": 262144, "writeOnly": true}
+        }
+      },
+      "CredentialStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["configured"],
+        "properties": {
+          "configured": {"type": "boolean"},
+          "secretResourceVersion": {"type": "string"},
+          "rotatedAt": {"type": "string", "format": "date-time"},
+          "rotatedBy": {"type": "string"},
+          "certificateSHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "certificateNotAfter": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CredentialStatusResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["apiVersion", "targetId", "credentialStatus"],
+        "properties": {
+          "apiVersion": {"$ref": "#/components/schemas/APIVersion"},
+          "targetId": {"$ref": "#/components/schemas/SafeID"},
+          "credentialStatus": {"$ref": "#/components/schemas/CredentialStatus"}
+        }
+      },
+      "Source": {
+        "type": "object",
+        "required": ["id", "digest"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/SafeID"},
+          "revision": {"type": "string"},
+          "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      },
+      "Target": {
+        "type": "object",
+        "required": ["id", "url", "space", "resourceSetId", "credentialStatus"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/SafeID"},
+          "url": {"type": "string", "format": "uri"},
+          "space": {"type": "string"},
+          "resourceSetId": {"$ref": "#/components/schemas/SafeID"},
+          "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+          "credentialStatus": {"$ref": "#/components/schemas/CredentialStatus"}
+        }
+      },
       "Job": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["id", "type", "status", "createdAt", "actorSubject", "requestId"],
         "properties": {
-          "id": {"type": "string"},
+          "id": {"$ref": "#/components/schemas/SafeID"},
           "type": {"type": "string", "enum": ["validation", "plan", "apply"]},
           "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "canceled", "interrupted"]},
           "createdAt": {"type": "string", "format": "date-time"},
@@ -182,23 +397,32 @@
           "failureCode": {"type": "string"}
         }
       },
-      "JobAcceptedResponse": {
-        "type": "object",
-        "required": ["job"],
-        "properties": {"job": {"$ref": "#/components/schemas/Job"}}
-      },
+      "PlanSummary": {"type": "object", "required": ["id", "createdAt", "creatorSubject"], "properties": {"id": {"$ref": "#/components/schemas/SafeID"}, "createdAt": {"type": "string", "format": "date-time"}, "creatorSubject": {"type": "string"}, "operationCount": {"type": "integer", "minimum": 0}}},
+      "ReportSummary": {"type": "object", "required": ["id", "planId", "createdAt"], "properties": {"id": {"$ref": "#/components/schemas/SafeID"}, "planId": {"$ref": "#/components/schemas/SafeID"}, "createdAt": {"type": "string", "format": "date-time"}, "outcome": {"type": "string"}}},
+      "AuditEvent": {"type": "object", "required": ["occurredAt", "requestId", "action", "outcome"], "properties": {"occurredAt": {"type": "string", "format": "date-time"}, "actorSubject": {"type": "string"}, "roles": {"type": "array", "items": {"type": "string"}}, "requestId": {"type": "string"}, "action": {"type": "string"}, "outcome": {"type": "string"}, "targetId": {"type": "string"}, "planId": {"type": "string"}, "jobId": {"type": "string"}, "reasonCode": {"type": "string"}}},
+      "SourceResponse": {"type": "object", "required": ["apiVersion", "source"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "source": {"$ref": "#/components/schemas/Source"}}},
+      "SourceListResponse": {"type": "object", "required": ["apiVersion", "sources"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "sources": {"type": "array", "items": {"$ref": "#/components/schemas/Source"}}, "nextPageToken": {"type": "string"}}},
+      "TargetResponse": {"type": "object", "required": ["apiVersion", "target"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "target": {"$ref": "#/components/schemas/Target"}}},
+      "TargetListResponse": {"type": "object", "required": ["apiVersion", "targets"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "targets": {"type": "array", "items": {"$ref": "#/components/schemas/Target"}}, "nextPageToken": {"type": "string"}}},
+      "JobResponse": {"type": "object", "required": ["apiVersion", "job"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "job": {"$ref": "#/components/schemas/Job"}}},
+      "JobAcceptedResponse": {"type": "object", "required": ["apiVersion", "job"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "job": {"$ref": "#/components/schemas/Job"}}},
+      "JobListResponse": {"type": "object", "required": ["apiVersion", "jobs"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "jobs": {"type": "array", "items": {"$ref": "#/components/schemas/Job"}}, "nextPageToken": {"type": "string"}}},
+      "PlanResponse": {"type": "object", "required": ["apiVersion", "plan"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "plan": {"$ref": "#/components/schemas/PlanSummary"}}},
+      "PlanListResponse": {"type": "object", "required": ["apiVersion", "plans"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "plans": {"type": "array", "items": {"$ref": "#/components/schemas/PlanSummary"}}, "nextPageToken": {"type": "string"}}},
+      "ReportResponse": {"type": "object", "required": ["apiVersion", "report"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "report": {"$ref": "#/components/schemas/ReportSummary"}}},
+      "ReportListResponse": {"type": "object", "required": ["apiVersion", "reports"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "reports": {"type": "array", "items": {"$ref": "#/components/schemas/ReportSummary"}}, "nextPageToken": {"type": "string"}}},
+      "AuditListResponse": {"type": "object", "required": ["apiVersion", "events"], "properties": {"apiVersion": {"$ref": "#/components/schemas/APIVersion"}, "events": {"type": "array", "items": {"$ref": "#/components/schemas/AuditEvent"}}, "nextPageToken": {"type": "string"}}},
       "ErrorEnvelope": {
         "type": "object",
-        "required": ["error"],
+        "additionalProperties": false,
+        "required": ["apiVersion", "error"],
         "properties": {
+          "apiVersion": {"$ref": "#/components/schemas/APIVersion"},
           "error": {
             "type": "object",
+            "additionalProperties": false,
             "required": ["code", "message", "requestId"],
-            "properties": {
-              "code": {"type": "string"},
-              "message": {"type": "string"},
-              "requestId": {"type": "string"}
-            }
+            "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "requestId": {"type": "string"}}
           }
         }
       }

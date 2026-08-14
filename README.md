@@ -4,7 +4,7 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository is in **Phase 0: API-server migration skeleton** and is not production-ready. The superseded CLI has been replaced by a strict server entry point and HTTP routing skeleton with health, readiness, OpenAPI, request-safety middleware, deny-by-default authentication, centralized RBAC, and asynchronous validation/plan/apply job contracts. The active direction is defined by:
+The repository is in **Phase 0: API-server migration skeleton** and is not production-ready. The superseded CLI has been replaced by a strict server entry point and HTTP routing skeleton with health, readiness, a versioned OpenAPI contract, request-safety middleware, deny-by-default authentication, centralized RBAC, and asynchronous validation/plan/apply job contracts. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`
@@ -59,4 +59,4 @@ Start the current skeleton with:
 go run ./cmd/elastic-maintainer --config internal/config/testdata/server-valid.yaml
 ```
 
-The skeleton exposes `/health/live`, `/health/ready`, and `/api/v1/openapi.json`. OIDC routes remain explicit placeholders. Protected routes deny access by default until production OIDC lands. Injected test authentication exercises session/RBAC behavior; authorized validation, plan, and apply requests enforce JSON and idempotency contracts but return explicit not-implemented job responses until durable execution is built. The old internal reconciler, JSON desired-state example, and Kubernetes Job remain migration artifacts and are not the final interface.
+The skeleton exposes `/health/live`, `/health/ready`, and `/api/v1/openapi.json`. The initial API contract covers session, mounted sources, targets, credential administration, validations, plans, jobs, reports, and audit. OIDC routes remain explicit placeholders. Protected routes deny access by default until production OIDC lands. Injected test authentication exercises session/RBAC behavior; authorized validation, plan, and apply requests enforce JSON and idempotency contracts but return explicit not-implemented job responses until durable execution is built. The old internal reconciler, JSON desired-state example, and Kubernetes Job remain migration artifacts and are not the final interface.
