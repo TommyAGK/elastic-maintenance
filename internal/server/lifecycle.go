@@ -9,8 +9,6 @@ import (
 	"elastic-maintenance/internal/config"
 )
 
-var ErrRuntimePending = errors.New("API server runtime is not implemented yet")
-
 type BuildInfo struct {
 	Version string
 	Commit  string
@@ -36,10 +34,6 @@ type Runtime interface {
 }
 
 type Factory func(*config.ServerConfig, BuildInfo) (Runtime, error)
-
-func NewPendingRuntime(*config.ServerConfig, BuildInfo) (Runtime, error) {
-	return pendingRuntime{}, nil
-}
 
 func Run(ctx context.Context, runtime Runtime, shutdownTimeout time.Duration) error {
 	if runtime == nil {
@@ -73,9 +67,3 @@ func Run(ctx context.Context, runtime Runtime, shutdownTimeout time.Duration) er
 		return fmt.Errorf("wait for API server shutdown: %w", shutdownContext.Err())
 	}
 }
-
-type pendingRuntime struct{}
-
-func (pendingRuntime) Serve() error { return ErrRuntimePending }
-
-func (pendingRuntime) Shutdown(context.Context) error { return nil }

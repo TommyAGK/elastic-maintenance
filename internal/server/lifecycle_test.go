@@ -107,16 +107,6 @@ func TestRunRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
-func TestPendingRuntimeIsExplicit(t *testing.T) {
-	runtime, err := NewPendingRuntime(nil, BuildInfo{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.Serve(); !errors.Is(err, ErrRuntimePending) {
-		t.Fatalf("Serve() error = %v", err)
-	}
-}
-
 type fakeRuntime struct {
 	serve    func() error
 	shutdown func(context.Context) error

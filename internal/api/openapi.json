@@ -1,0 +1,74 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Elastic Maintainer API",
+    "version": "v1alpha1",
+    "description": "Initial web-first API server skeleton. Domain operations are added incrementally behind /api/v1."
+  },
+  "paths": {
+    "/health/live": {
+      "get": {
+        "operationId": "getLiveness",
+        "responses": {"200": {"description": "Process is live"}}
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "responses": {
+          "200": {"description": "Process is ready"},
+          "503": {"description": "Process is not ready"}
+        }
+      }
+    },
+    "/auth/login": {
+      "get": {
+        "operationId": "beginOIDCLogin",
+        "responses": {"501": {"description": "OIDC is not implemented in the skeleton"}}
+      }
+    },
+    "/auth/callback": {
+      "get": {
+        "operationId": "completeOIDCCallback",
+        "responses": {"501": {"description": "OIDC is not implemented in the skeleton"}}
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "responses": {"501": {"description": "OIDC is not implemented in the skeleton"}}
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenAPI",
+        "responses": {"200": {"description": "OpenAPI document"}}
+      }
+    },
+    "/api/v1/session": {
+      "get": {
+        "operationId": "getSession",
+        "responses": {"401": {"description": "Authentication is required"}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "requestId"],
+            "properties": {
+              "code": {"type": "string"},
+              "message": {"type": "string"},
+              "requestId": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

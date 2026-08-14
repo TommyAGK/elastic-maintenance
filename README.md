@@ -4,7 +4,7 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository is in **Phase 0: API-server migration skeleton** and is not production-ready. The superseded CLI entry point has been replaced by the new server entry point and strict startup configuration; the HTTP runtime is the next implementation step. The active direction is defined by:
+The repository is in **Phase 0: API-server migration skeleton** and is not production-ready. The superseded CLI has been replaced by a strict server entry point and HTTP routing skeleton with health, readiness, OpenAPI, request-safety middleware, authentication placeholders, and protected API boundaries. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`
@@ -53,4 +53,10 @@ go test ./...
 go run ./cmd/elastic-maintainer --version
 ```
 
-Until the Phase 0.5 HTTP runtime lands, starting with a valid server configuration exits with an explicit “API server runtime is not implemented yet” error. The old internal reconciler, JSON desired-state example, Dockerfile, and Kubernetes Job remain migration artifacts and are not the final interface.
+Start the current skeleton with:
+
+```bash
+go run ./cmd/elastic-maintainer --config internal/config/testdata/server-valid.yaml
+```
+
+The skeleton exposes `/health/live`, `/health/ready`, and `/api/v1/openapi.json`. OIDC routes return explicit not-implemented responses and other `/api/v1` routes require the authentication boundary that lands in later Phase 0 work. The old internal reconciler, JSON desired-state example, and Kubernetes Job remain migration artifacts and are not the final interface.

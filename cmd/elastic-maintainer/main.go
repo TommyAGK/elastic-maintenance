@@ -39,7 +39,7 @@ func realMain() int {
 		os.Stdout,
 		os.Stderr,
 		os.LookupEnv,
-		server.NewPendingRuntime,
+		server.NewHTTPRuntime,
 		server.BuildInfo{Version: version, Commit: commit, Date: buildDate},
 		shutdownTimeout,
 	)

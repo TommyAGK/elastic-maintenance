@@ -1,0 +1,221 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"elastic-maintenance/internal/api"
+	"elastic-maintenance/internal/config"
+)
+
+func TestHandlerRoutes(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		method          string
+		path            string
+		ready           bool
+		wantStatus      int
+		wantCode        string
+		wantStatusValue string
+	}{
+		"live":                  {method: http.MethodGet, path: "/health/live", ready: false, wantStatus: http.StatusOK, wantStatusValue: "live"},
+		"ready":                 {method: http.MethodGet, path: "/health/ready", ready: true, wantStatus: http.StatusOK, wantStatusValue: "ready"},
+		"not ready":             {method: http.MethodGet, path: "/health/ready", ready: false, wantStatus: http.StatusServiceUnavailable, wantCode: "not_ready"},
+		"login placeholder":     {method: http.MethodGet, path: "/auth/login", wantStatus: http.StatusNotImplemented, wantCode: "not_implemented"},
+		"callback placeholder":  {method: http.MethodGet, path: "/auth/callback", wantStatus: http.StatusNotImplemented, wantCode: "not_implemented"},
+		"logout placeholder":    {method: http.MethodPost, path: "/auth/logout", wantStatus: http.StatusNotImplemented, wantCode: "not_implemented"},
+		"protected API root":    {method: http.MethodGet, path: "/api/v1", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
+		"protected API":         {method: http.MethodGet, path: "/api/v1/session", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
+		"protected unknown API": {method: http.MethodGet, path: "/api/v1/future", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
+		"unknown route":         {method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound, wantCode: "not_found"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			handler := NewHandler(HandlerOptions{IsReady: func() bool { return testCase.ready }})
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(testCase.method, testCase.path, nil)
+			handler.ServeHTTP(response, request)
+
+			if response.Code != testCase.wantStatus {
+				t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+			}
+			if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("X-Request-ID") == "" {
+				t.Fatalf("headers = %#v", response.Header())
+			}
+			if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Fatalf("security headers = %#v", response.Header())
+			}
+			if testCase.wantCode != "" {
+				var envelope api.ErrorEnvelope
+				if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+					t.Fatal(err)
+				}
+				if envelope.Error.Code != testCase.wantCode || envelope.Error.RequestID != response.Header().Get("X-Request-ID") {
+					t.Fatalf("error envelope = %#v", envelope)
+				}
+			}
+			if testCase.wantStatusValue != "" {
+				var body map[string]string
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				if body["status"] != testCase.wantStatusValue {
+					t.Fatalf("body = %#v", body)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAPIEndpoint(t *testing.T) {
+	handler := NewHandler(HandlerOptions{})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/openapi.json", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+	}
+	var document map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if document["openapi"] != "3.0.3" {
+		t.Fatalf("openapi = %#v", document["openapi"])
+	}
+}
+
+func TestHandlerHEADAndMethodRules(t *testing.T) {
+	handler := NewHandler(HandlerOptions{})
+
+	head := httptest.NewRecorder()
+	handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/health/live", nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Fatalf("HEAD status=%d body=%q", head.Code, head.Body.String())
+	}
+
+	wrongMethod := httptest.NewRecorder()
+	handler.ServeHTTP(wrongMethod, httptest.NewRequest(http.MethodPost, "/health/live", nil))
+	if wrongMethod.Code != http.StatusMethodNotAllowed || wrongMethod.Header().Get("Allow") != "GET, HEAD" {
+		t.Fatalf("status=%d allow=%q", wrongMethod.Code, wrongMethod.Header().Get("Allow"))
+	}
+}
+
+func TestHandlerRejectsOversizedBodyBeforeRouting(t *testing.T) {
+	handler := NewHandler(HandlerOptions{})
+	request := httptest.NewRequest(http.MethodPost, "/auth/logout", strings.NewReader(strings.Repeat("x", maxRequestBodyBytes+1)))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestRequestIDsAreServerGenerated(t *testing.T) {
+	handler := NewHandler(HandlerOptions{})
+	request := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	request.Header.Set("X-Request-ID", "attacker-controlled")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	got := response.Header().Get("X-Request-ID")
+	if got == "" || got == "attacker-controlled" || !requestIDPattern.MatchString(got) {
+		t.Fatalf("X-Request-ID = %q", got)
+	}
+}
+
+func TestRecoveryAndAccessLogsExcludeSensitiveValues(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	panicHandler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("credential-value-must-not-be-logged")
+	})
+	handler := requestIDMiddleware(accessLogMiddleware(logger, recoveryMiddleware(logger, panicHandler)))
+	request := httptest.NewRequest(http.MethodGet, "/panic?api_key=query-secret", nil)
+	request.Header.Set("Authorization", "Bearer header-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	for _, forbidden := range []string{"credential-value-must-not-be-logged", "query-secret", "header-secret", "Authorization", "api_key"} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Fatalf("logs contain %q: %s", forbidden, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "HTTP handler panic recovered") || !strings.Contains(logs.String(), `"path":"/panic"`) {
+		t.Fatalf("logs = %s", logs.String())
+	}
+}
+
+func TestHTTPRuntimeServesAndShutsDown(t *testing.T) {
+	cfg, err := config.LoadServerConfig("../config/testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := func(network, address string) (net.Listener, error) {
+		if network != "tcp" || address != cfg.Listen {
+			t.Fatalf("listen(%q, %q)", network, address)
+		}
+		return listener, nil
+	}
+	var logs bytes.Buffer
+	runtimeValue, err := newHTTPRuntime(cfg, BuildInfo{}, slog.New(slog.NewJSONHandler(&logs, nil)), listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeValue.(*HTTPRuntime)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- runtime.Serve() }()
+
+	client := &http.Client{Timeout: time.Second}
+	response, err := client.Get("http://" + listener.Addr().String() + "/health/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ready"`) {
+		t.Fatalf("status=%d body=%q", response.StatusCode, body)
+	}
+	if runtime.build != (BuildInfo{Version: "dev", Commit: "none", Date: "unknown"}) {
+		t.Fatalf("build = %#v", runtime.build)
+	}
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := runtime.Shutdown(shutdownContext); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serveResult; err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	if runtime.ready.Load() {
+		t.Fatal("runtime remained ready after shutdown")
+	}
+}
+
+func TestNewHTTPRuntimeValidatesBeforeListening(t *testing.T) {
+	called := false
+	listen := func(string, string) (net.Listener, error) {
+		called = true
+		return nil, errors.New("must not be called")
+	}
+	_, err := newHTTPRuntime(&config.ServerConfig{}, BuildInfo{}, slog.Default(), listen)
+	if err == nil || called {
+		t.Fatalf("error=%v listenCalled=%v", err, called)
+	}
+}

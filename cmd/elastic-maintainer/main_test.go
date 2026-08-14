@@ -155,14 +155,6 @@ func TestExecuteReportsFactoryAndRuntimeErrorsOnce(t *testing.T) {
 	}
 }
 
-func TestExecutePendingRuntimeIsHonest(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := execute(context.Background(), []string{"--config", validConfigPath()}, &stdout, &stderr, emptyLookup, server.NewPendingRuntime, server.BuildInfo{}, time.Second)
-	if code != 1 || !strings.Contains(stderr.String(), server.ErrRuntimePending.Error()) {
-		t.Fatalf("code=%d stderr=%q", code, stderr.String())
-	}
-}
-
 func emptyLookup(string) (string, bool) { return "", false }
 
 func validConfigPath() string {
