@@ -48,12 +48,32 @@
     "/api/v1/session": {
       "get": {
         "operationId": "getSession",
-        "responses": {"401": {"description": "Authentication is required"}}
+        "responses": {
+          "200": {
+            "description": "Authenticated actor and roles",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}
+          },
+          "401": {"description": "Authentication is required"},
+          "403": {"description": "Permission is denied"}
+        }
       }
     }
   },
   "components": {
     "schemas": {
+      "Session": {
+        "type": "object",
+        "required": ["authenticated", "subject", "roles"],
+        "properties": {
+          "authenticated": {"type": "boolean", "enum": [true]},
+          "subject": {"type": "string"},
+          "displayName": {"type": "string"},
+          "roles": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["viewer", "planner", "applier", "administrator"]}
+          }
+        }
+      },
       "ErrorEnvelope": {
         "type": "object",
         "required": ["error"],

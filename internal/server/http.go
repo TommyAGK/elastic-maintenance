@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"elastic-maintenance/internal/api"
+	"elastic-maintenance/internal/auth"
 	"elastic-maintenance/internal/config"
 )
 
@@ -32,8 +33,10 @@ const (
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type HandlerOptions struct {
-	Logger  *slog.Logger
-	IsReady func() bool
+	Logger        *slog.Logger
+	IsReady       func() bool
+	Authenticator auth.Authenticator
+	Authorizer    auth.Authorizer
 }
 
 type HTTPRuntime struct {
@@ -113,6 +116,14 @@ func NewHandler(options HandlerOptions) http.Handler {
 	if isReady == nil {
 		isReady = func() bool { return true }
 	}
+	authenticator := options.Authenticator
+	if authenticator == nil {
+		authenticator = auth.DenyAuthenticator{}
+	}
+	authorizer := options.Authorizer
+	if authorizer == nil {
+		authorizer = auth.RBACAuthorizer{}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, request *http.Request) {
@@ -144,11 +155,14 @@ func NewHandler(options HandlerOptions) http.Handler {
 	mux.HandleFunc("/auth/login", notImplementedAuth(http.MethodGet))
 	mux.HandleFunc("/auth/callback", notImplementedAuth(http.MethodGet))
 	mux.HandleFunc("/auth/logout", notImplementedAuth(http.MethodPost))
-	protectedAPI := func(w http.ResponseWriter, request *http.Request) {
-		api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
-	}
-	mux.HandleFunc("/api/v1", protectedAPI)
-	mux.HandleFunc("/api/v1/", protectedAPI)
+
+	protectedMux := http.NewServeMux()
+	protectedMux.Handle("/api/v1/session", authorize(authorizer, auth.PermissionSessionRead, http.HandlerFunc(sessionHandler)))
+	protectedMux.HandleFunc("/api/v1", protectedNotFound)
+	protectedMux.HandleFunc("/api/v1/", protectedNotFound)
+	protectedAPI := authenticate(authenticator, protectedMux)
+	mux.Handle("/api/v1", protectedAPI)
+	mux.Handle("/api/v1/", protectedAPI)
 	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {
 		api.WriteError(w, request, http.StatusNotFound, "not_found", "route not found", RequestID(request.Context()))
 	})
@@ -162,6 +176,58 @@ func NewHandler(options HandlerOptions) http.Handler {
 			),
 		),
 	)
+}
+
+func sessionHandler(w http.ResponseWriter, request *http.Request) {
+	if !allowMethods(w, request, http.MethodGet, http.MethodHead) {
+		return
+	}
+	actor, ok := auth.ActorFromContext(request.Context())
+	if !ok {
+		api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
+		return
+	}
+	api.WriteJSON(w, request, http.StatusOK, map[string]any{
+		"authenticated": true,
+		"subject":       actor.Subject,
+		"displayName":   actor.DisplayName,
+		"roles":         actor.Roles,
+	})
+}
+
+func protectedNotFound(w http.ResponseWriter, request *http.Request) {
+	api.WriteError(w, request, http.StatusNotFound, "not_found", "route not found", RequestID(request.Context()))
+}
+
+func authenticate(authenticator auth.Authenticator, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		actor, err := authenticator.Authenticate(request)
+		if err != nil {
+			api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
+			return
+		}
+		normalized, err := actor.Normalized()
+		if err != nil {
+			api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
+			return
+		}
+		next.ServeHTTP(w, request.WithContext(auth.WithActor(request.Context(), normalized)))
+	})
+}
+
+func authorize(authorizer auth.Authorizer, permission auth.Permission, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		actor, ok := auth.ActorFromContext(request.Context())
+		if !ok {
+			api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
+			return
+		}
+		if err := authorizer.Authorize(actor, permission); err != nil {
+			api.WriteError(w, request, http.StatusForbidden, "permission_denied", "permission denied", RequestID(request.Context()))
+			return
+		}
+		next.ServeHTTP(w, request)
+	})
 }
 
 func notImplementedAuth(method string) http.HandlerFunc {

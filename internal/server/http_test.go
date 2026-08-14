@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"elastic-maintenance/internal/api"
+	"elastic-maintenance/internal/auth"
+	"elastic-maintenance/internal/auth/authtest"
 	"elastic-maintenance/internal/config"
 )
 
@@ -72,6 +74,69 @@ func TestHandlerRoutes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAuthenticatedSessionAndProtectedRouting(t *testing.T) {
+	handler := NewHandler(HandlerOptions{
+		Authenticator: authtest.Authenticator{Actor: auth.Actor{
+			Subject:     "operator-1",
+			DisplayName: "Operator",
+			Roles:       []auth.Role{auth.RoleViewer, auth.RolePlanner, auth.RoleViewer},
+		}},
+	})
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/session", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	var session struct {
+		Authenticated bool        `json:"authenticated"`
+		Subject       string      `json:"subject"`
+		DisplayName   string      `json:"displayName"`
+		Roles         []auth.Role `json:"roles"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	if !session.Authenticated || session.Subject != "operator-1" || session.DisplayName != "Operator" || len(session.Roles) != 2 || session.Roles[0] != auth.RolePlanner || session.Roles[1] != auth.RoleViewer {
+		t.Fatalf("session = %#v", session)
+	}
+
+	unknown := httptest.NewRecorder()
+	handler.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "/api/v1/future", nil))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown protected status=%d body=%q", unknown.Code, unknown.Body.String())
+	}
+}
+
+func TestProtectedRouteAuthorizationDeniesActorWithoutRole(t *testing.T) {
+	handler := NewHandler(HandlerOptions{
+		Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator-1"}},
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/session", nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	var envelope api.ErrorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error.Code != "permission_denied" {
+		t.Fatalf("error = %#v", envelope.Error)
+	}
+}
+
+func TestProtectedRouteAuthenticationErrorsRemainGeneric(t *testing.T) {
+	handler := NewHandler(HandlerOptions{
+		Authenticator: authtest.Authenticator{Err: errors.New("token contained sensitive diagnostic")},
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/session", nil))
+	if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), "sensitive diagnostic") {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 
