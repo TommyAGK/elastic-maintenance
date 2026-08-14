@@ -46,17 +46,19 @@ The service does not clone, fetch, poll, edit, or commit Git repositories. GitOp
 
 ## Development baseline
 
-Run the current tests and inspect build identity with:
+The canonical Go module is `github.com/TommyAGK/elastic-maintenance`. Run the standard build checks and inspect the linker-injected build identity with:
 
 ```bash
-go test ./...
-go run ./cmd/elastic-maintainer --version
+make test
+make vet
+make build
+make version
 ```
 
-Start the current skeleton with:
+This creates the server directly at `bin/elastic-maintainer`. Start the current skeleton with the non-secret local fixture:
 
 ```bash
-go run ./cmd/elastic-maintainer --config internal/config/testdata/server-valid.yaml
+bin/elastic-maintainer --config testdata/server-minimal.yaml
 ```
 
 The skeleton exposes `/health/live`, `/health/ready`, and `/api/v1/openapi.json`. The initial API contract covers session, mounted sources, targets, credential administration, validations, plans, jobs, reports, and audit. OIDC routes remain explicit placeholders. Protected routes deny access by default until production OIDC lands. Injected test authentication exercises session/RBAC behavior; authorized validation, plan, and apply requests enforce JSON and idempotency contracts but return explicit not-implemented job responses until durable execution is built. The old internal reconciler, JSON desired-state example, and Kubernetes Job remain migration artifacts and are not the final interface.

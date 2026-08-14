@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"time"
 
-	"elastic-maintenance/internal/auth"
+	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 )
 
 type Action string

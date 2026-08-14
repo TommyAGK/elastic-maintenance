@@ -25,6 +25,19 @@ func TestLoadAndValidateServerConfig(t *testing.T) {
 	}
 }
 
+func TestMinimalServerFixtureIsValid(t *testing.T) {
+	cfg, err := LoadServerConfig(filepath.Join("..", "..", "testdata", "server-minimal.yaml"))
+	if err != nil {
+		t.Fatalf("LoadServerConfig() error = %v", err)
+	}
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("ValidateStartup() error = %v", err)
+	}
+	if len(cfg.ResourceSets) != 0 || len(cfg.Targets) != 0 {
+		t.Fatalf("minimal fixture unexpectedly defines domain resources")
+	}
+}
+
 func TestLoadServerConfigUsesSafeDefaults(t *testing.T) {
 	contents := strings.ReplaceAll(readFixture(t), "listen: :8080\n", "")
 	contents = strings.ReplaceAll(contents, "stateDir: /var/lib/elastic-maintainer/state\n", "")

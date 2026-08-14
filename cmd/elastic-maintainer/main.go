@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"elastic-maintenance/internal/config"
-	"elastic-maintenance/internal/server"
+	"github.com/TommyAGK/elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/server"
 )
 
 const (

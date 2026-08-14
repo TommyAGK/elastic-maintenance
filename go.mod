@@ -1,4 +1,4 @@
-module elastic-maintenance
+module github.com/TommyAGK/elastic-maintenance
 
 go 1.22
 

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"elastic-maintenance/internal/auth"
+	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 )
 
 const Version = "elastic-maintainer/v1alpha1"

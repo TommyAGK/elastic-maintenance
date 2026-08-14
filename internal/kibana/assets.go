@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/config"
 )
 
 func normalize(s string) string { return strings.ToLower(strings.TrimSpace(s)) }

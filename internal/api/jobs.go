@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/http"
 
-	"elastic-maintenance/internal/jobs"
+	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
 )
 
 const IdempotencyKeyHeader = "Idempotency-Key"

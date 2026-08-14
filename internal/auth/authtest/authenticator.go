@@ -5,7 +5,7 @@ package authtest
 import (
 	"net/http"
 
-	"elastic-maintenance/internal/auth"
+	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 )
 
 type Authenticator struct {

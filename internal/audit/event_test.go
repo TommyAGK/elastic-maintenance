@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"elastic-maintenance/internal/auth"
+	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 )
 
 func TestEventValidate(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"elastic-maintenance/internal/config"
-	"elastic-maintenance/internal/kibana"
+	"github.com/TommyAGK/elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/kibana"
 )
 
 type Mode string

@@ -3,9 +3,9 @@ package reconcile
 import (
 	"testing"
 
-	"elastic-maintenance/internal/config"
-	"elastic-maintenance/internal/kibana"
-	"elastic-maintenance/internal/mockkibana"
+	"github.com/TommyAGK/elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/kibana"
+	"github.com/TommyAGK/elastic-maintenance/internal/mockkibana"
 )
 
 func TestReviewAgainstMockKibana(t *testing.T) {

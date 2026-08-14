@@ -17,9 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"elastic-maintenance/internal/api"
-	"elastic-maintenance/internal/auth"
-	"elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/api"
+	"github.com/TommyAGK/elastic-maintenance/internal/auth"
+	"github.com/TommyAGK/elastic-maintenance/internal/config"
 )
 
 const (

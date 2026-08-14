@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/config"
 )
 
 type BuildInfo struct {

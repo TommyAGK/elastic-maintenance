@@ -1,0 +1,29 @@
+apiVersion: elastic-maintainer/v1alpha1
+stateID: local-development
+publicURL: http://127.0.0.1:18080
+listen: 127.0.0.1:18080
+stateDir: /tmp/elastic-maintainer-state
+mountRoots:
+  - /tmp/elastic-maintainer-sources
+oidc:
+  issuerURL: https://identity.example.test
+  clientID: elastic-maintainer-local
+  clientSecret:
+    namespace: elastic-maintainer
+    name: elastic-maintainer-oidc
+    key: client-secret
+  sessionSecret:
+    namespace: elastic-maintainer
+    name: elastic-maintainer-session
+    key: session-key
+  redirectURL: http://127.0.0.1:18080/auth/callback
+  scopes:
+    - openid
+authorization:
+  roleClaim: groups
+  roleMappings:
+    viewer:
+      - elastic-maintainer-viewers
+secretPolicy:
+  namespace: elastic-maintainer
+  namePrefix: elastic-maintainer-target-
