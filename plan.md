@@ -383,6 +383,8 @@ It must label and ownership-check every Docker object before reuse/removal, bind
 
 ### Phase 0 — contract fixtures and migration skeleton
 
+Detailed sub-plan: `docs/implementation/subplans/phase-0-contract-fixtures-and-migration-skeleton.md`
+
 - Confirm documented request/response contracts against Kibana 9.2.0 and the current selected 9.x patch.
 - Capture sanitized `httptest` fixtures for every adapter and pagination style.
 - Rename the command/module packages and remove prototype-only behavior.
@@ -392,12 +394,16 @@ Gate: exact public endpoints, caller-defined ID support, required privileges, an
 
 ### Phase 1 — strict inputs and validation
 
+Detailed sub-plan: `docs/implementation/subplans/phase-1-strict-inputs-and-validation.md`
+
 - Implement target config, manifest envelopes, resource schemas, selectors, references, dependency cycle checks, and canonical input digests.
 - Add examples and `validate`.
 
 Gate: malformed, ambiguous, duplicate, dangling, cross-selector, and secret-bearing inputs fail locally with actionable diagnostics.
 
 ### Phase 2 — API client and read adapters
+
+Detailed sub-plan: `docs/implementation/subplans/phase-2-api-client-and-read-adapters.md`
 
 - Implement spaces, authentication, TLS/CA, version checks, pagination, error classes, and canonical live-resource projections.
 - Implement read/status methods for all kinds.
@@ -406,11 +412,15 @@ Gate: contract tests pass for both supported live versions and no single-page as
 
 ### Phase 3 — inventory, diff, and saved plans
 
+Detailed sub-plan: `docs/implementation/subplans/phase-3-inventory-diff-and-saved-plans.md`
+
 - Implement file state, locks, journals, ownership rules, pruning authority, dependency DAG, per-target planning, deterministic plan JSON, and CLI review output.
 
 Gate: converged plans contain zero operations; unmanaged or marker-only resources cannot produce deletes.
 
 ### Phase 4 — apply
+
+Detailed sub-plan: `docs/implementation/subplans/phase-4-apply.md`
 
 - Implement preflight validation, baseline checks, mutation adapters, post-state verification, inventory/journal updates, dependency skips, partial-target continuation, reports, and exit codes.
 
@@ -418,12 +428,16 @@ Gate: every safety and partial-failure acceptance test passes with fault injecti
 
 ### Phase 5 — web interface
 
+Detailed sub-plan: `docs/implementation/subplans/phase-5-web-interface.md`
+
 - Implement embedded assets and the loopback API over shared services.
 - Add browser/API tests for validation, planning, apply reporting, CSRF/origin/host enforcement, concurrency, and redaction.
 
 Gate: every operator-relevant CLI outcome has equivalent visibility in the web interface without exposing credentials or internal-only data.
 
 ### Phase 6 — container, Kubernetes, and live matrix
+
+Detailed sub-plan: `docs/implementation/subplans/phase-6-container-kubernetes-and-live-matrix.md`
 
 - Finalize the Docker image, Kubernetes planner/applier Jobs, PVC workflow, security contexts, operator guide, and local Docker test launcher.
 - Run end-to-end tests against Kibana 9.2.0 and the current selected 9.x patch (initially 9.4.2 unless a newer stable 9.x release is current when implementation begins).
