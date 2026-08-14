@@ -4,7 +4,7 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository is in **Phase 0: API-server migration skeleton**. The tracked Go code is still the superseded CLI prototype and is not production-ready. The active implementation direction is defined by:
+The repository is in **Phase 0: API-server migration skeleton** and is not production-ready. The superseded CLI entry point has been replaced by the new server entry point and strict startup configuration; the HTTP runtime is the next implementation step. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`
@@ -46,10 +46,11 @@ The service does not clone, fetch, poll, edit, or commit Git repositories. GitOp
 
 ## Development baseline
 
-The pre-migration prototype tests currently run with:
+Run the current tests and inspect build identity with:
 
 ```bash
 go test ./...
+go run ./cmd/elastic-maintainer --version
 ```
 
-Do not treat the current prototype command, JSON desired-state example, Dockerfile, or Kubernetes Job as the final interface. They will be replaced incrementally under the Phase 0 gate.
+Until the Phase 0.5 HTTP runtime lands, starting with a valid server configuration exits with an explicit “API server runtime is not implemented yet” error. The old internal reconciler, JSON desired-state example, Dockerfile, and Kubernetes Job remain migration artifacts and are not the final interface.
