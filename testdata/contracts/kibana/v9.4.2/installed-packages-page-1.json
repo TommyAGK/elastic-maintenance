@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "dataStreams": [],
+      "name": "endpoint",
+      "status": "installed",
+      "title": "Elastic Defend",
+      "version": "9.2.0"
+    }
+  ],
+  "searchAfter": [
+    "endpoint",
+    "9.2.0"
+  ],
+  "total": 2
+}

@@ -1,0 +1,50 @@
+{
+  "data": [
+    {
+      "actions": [],
+      "author": [
+        "Fixture Author"
+      ],
+      "created_at": "2026-01-01T00:00:00.000Z",
+      "created_by": "fixture-user",
+      "description": "Sanitized contract fixture",
+      "enabled": true,
+      "exceptions_list": [],
+      "false_positives": [],
+      "from": "now-6m",
+      "id": "unmanaged-server-id",
+      "immutable": false,
+      "index": [
+        "logs-*"
+      ],
+      "interval": "5m",
+      "language": "kuery",
+      "max_signals": 100,
+      "name": "Unmanaged fixture rule",
+      "query": "event.kind:event",
+      "references": [],
+      "related_integrations": [],
+      "required_fields": [],
+      "revision": 0,
+      "risk_score": 21,
+      "risk_score_mapping": [],
+      "rule_id": "unmanaged-rule",
+      "rule_source": {
+        "type": "internal"
+      },
+      "setup": "",
+      "severity": "low",
+      "severity_mapping": [],
+      "tags": [],
+      "threat": [],
+      "to": "now",
+      "type": "query",
+      "updated_at": "2026-01-01T00:00:00.000Z",
+      "updated_by": "fixture-user",
+      "version": 1
+    }
+  ],
+  "page": 2,
+  "perPage": 1,
+  "total": 2
+}

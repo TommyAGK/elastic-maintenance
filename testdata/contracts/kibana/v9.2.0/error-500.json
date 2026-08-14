@@ -1,0 +1,5 @@
+{
+  "error": "Internal Server Error",
+  "message": "Sanitized remote failure",
+  "statusCode": 500
+}

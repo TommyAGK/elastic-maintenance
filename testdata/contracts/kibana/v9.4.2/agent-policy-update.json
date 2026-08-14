@@ -1,0 +1,14 @@
+{
+  "item": {
+    "description": "[managed-by:elastic-maintainer] fixture updated",
+    "id": "agent-policy-1",
+    "is_managed": false,
+    "is_protected": false,
+    "name": "Endpoint agents updated",
+    "namespace": "default",
+    "revision": 2,
+    "status": "active",
+    "updated_at": "2026-01-01T00:00:00.000Z",
+    "updated_by": "fixture-user"
+  }
+}

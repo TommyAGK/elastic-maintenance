@@ -1,0 +1,5 @@
+{
+  "error": "Not Found",
+  "message": "Fixture resource was not found",
+  "statusCode": 404
+}

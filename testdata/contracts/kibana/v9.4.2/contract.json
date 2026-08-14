@@ -1,0 +1,185 @@
+{
+  "errorFixtures": [
+    "error-401.json",
+    "error-403.json",
+    "error-404.json",
+    "error-409.json",
+    "error-429.json",
+    "error-500.json"
+  ],
+  "formatVersion": 1,
+  "kibanaVersion": "9.4.2",
+  "operations": [
+    {
+      "adapter": "integration-package",
+      "method": "GET",
+      "operation": "list-installed",
+      "pagination": "searchAfter",
+      "path": "/api/fleet/epm/packages/installed",
+      "response": "installed-packages-page-1.json"
+    },
+    {
+      "adapter": "integration-package",
+      "method": "GET",
+      "operation": "read-exact",
+      "path": "/api/fleet/epm/packages/{pkgName}/{pkgVersion}",
+      "response": "integration-package.json"
+    },
+    {
+      "adapter": "integration-package",
+      "headers": [
+        "kbn-xsrf"
+      ],
+      "method": "POST",
+      "operation": "install-exact",
+      "path": "/api/fleet/epm/packages/{pkgName}/{pkgVersion}",
+      "response": "integration-install.json"
+    },
+    {
+      "adapter": "agent-policy",
+      "method": "GET",
+      "operation": "list",
+      "pagination": "page/perPage",
+      "path": "/api/fleet/agent_policies",
+      "response": "agent-policies-page-1.json"
+    },
+    {
+      "adapter": "agent-policy",
+      "method": "GET",
+      "operation": "read",
+      "path": "/api/fleet/agent_policies/{agentPolicyId}",
+      "response": "agent-policy.json"
+    },
+    {
+      "adapter": "agent-policy",
+      "headers": [
+        "kbn-xsrf"
+      ],
+      "method": "POST",
+      "operation": "create",
+      "path": "/api/fleet/agent_policies",
+      "response": "agent-policy-create.json"
+    },
+    {
+      "adapter": "agent-policy",
+      "headers": [
+        "kbn-xsrf"
+      ],
+      "method": "PUT",
+      "operation": "update",
+      "path": "/api/fleet/agent_policies/{agentPolicyId}",
+      "response": "agent-policy-update.json"
+    },
+    {
+      "adapter": "agent-policy",
+      "headers": [
+        "kbn-xsrf"
+      ],
+      "method": "POST",
+      "operation": "delete",
+      "path": "/api/fleet/agent_policies/delete",
+      "response": "agent-policy-delete.json"
+    },
+    {
+      "adapter": "package-policy",
+      "method": "GET",
+      "operation": "list",
+      "pagination": "page/perPage",
+      "path": "/api/fleet/package_policies",
+      "response": "package-policies-page-1.json"
+    },
+    {
+      "adapter": "package-policy",
+      "method": "GET",
+      "operation": "read",
+      "path": "/api/fleet/package_policies/{packagePolicyId}",
+      "response": "package-policy.json"
+    },
+    {
+      "adapter": "package-policy",
+      "headers": [
+        "kbn-xsrf"
+      ],
+      "method": "POST",
+      "operation": "create",
+      "path": "/api/fleet/package_policies",
+      "response": "package-policy-create.json"
+    },
+    {
+      "adapter": "package-policy",
+      "headers": [
+        "kbn-xsrf"
+      ],
+      "method": "PUT",
+      "operation": "update",
+      "path": "/api/fleet/package_policies/{packagePolicyId}",
+      "response": "package-policy-update.json"
+    },
+    {
+      "adapter": "package-policy",
+      "headers": [
+        "kbn-xsrf"
+      ],
+      "method": "DELETE",
+      "operation": "delete",
+      "path": "/api/fleet/package_policies/{packagePolicyId}",
+      "response": "package-policy-delete.json"
+    },
+    {
+      "adapter": "detection-rule",
+      "method": "GET",
+      "operation": "list",
+      "pagination": "page/per_page",
+      "path": "/api/detection_engine/rules/_find",
+      "response": "detection-rules-page-1.json"
+    },
+    {
+      "adapter": "detection-rule",
+      "method": "GET",
+      "operation": "read",
+      "path": "/api/detection_engine/rules?rule_id={ruleId}",
+      "response": "detection-rule.json"
+    },
+    {
+      "adapter": "detection-rule",
+      "method": "POST",
+      "operation": "create",
+      "path": "/api/detection_engine/rules",
+      "response": "detection-rule-create.json"
+    },
+    {
+      "adapter": "detection-rule",
+      "method": "PUT",
+      "operation": "update",
+      "path": "/api/detection_engine/rules",
+      "response": "detection-rule-update.json"
+    },
+    {
+      "adapter": "detection-rule",
+      "method": "DELETE",
+      "operation": "delete",
+      "path": "/api/detection_engine/rules?rule_id={ruleId}",
+      "response": "detection-rule-delete.json"
+    },
+    {
+      "adapter": "prebuilt-rules",
+      "method": "GET",
+      "operation": "status",
+      "path": "/api/detection_engine/rules/prepackaged/_status",
+      "response": "prebuilt-status.json"
+    },
+    {
+      "adapter": "prebuilt-rules",
+      "method": "PUT",
+      "operation": "install-update",
+      "path": "/api/detection_engine/rules/prepackaged",
+      "response": "prebuilt-install.json"
+    }
+  ],
+  "source": {
+    "evidence": "pinned-public-openapi",
+    "sha256": "16aec3bc6a2f95f084883306ddfa24ae54d40e396a900a8ec138f17a158e7bf4",
+    "url": "https://raw.githubusercontent.com/elastic/kibana/v9.4.2/oas_docs/output/kibana.yaml"
+  },
+  "spacesPrefix": "/s/{space_id}"
+}

@@ -168,9 +168,11 @@ Stable remote identity mapping:
 - Require `spec.name` and an exact pinned semantic `spec.version`; reject `latest` and ranges.
 - Install when missing and upgrade when the installed version differs and the requested transition is supported.
 - Never uninstall or downgrade automatically. An installed version newer than desired is a conflict unless the public API contract and an explicit future option permit downgrade.
-- Use the public EPM package APIs, including:
-  - package read: `GET /api/fleet/epm/packages/{pkgName}`
+- Use the public EPM package APIs common to both supported versions, including:
+  - installed-package inventory: `GET /api/fleet/epm/packages/installed`
+  - exact-version read: `GET /api/fleet/epm/packages/{pkgName}/{pkgVersion}`
   - exact install: `POST /api/fleet/epm/packages/{pkgName}/{pkgVersion}`
+- Do not depend on unversioned `GET /api/fleet/epm/packages/{pkgName}` because it is absent from the Kibana 9.2.0 public specification.
 
 ### AgentPolicy
 

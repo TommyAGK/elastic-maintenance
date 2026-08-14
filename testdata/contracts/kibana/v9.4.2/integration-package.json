@@ -1,0 +1,18 @@
+{
+  "item": {
+    "assets": {
+      "kibana": {
+        "dashboard": [],
+        "index_pattern": []
+      }
+    },
+    "categories": [
+      "security"
+    ],
+    "description": "Sanitized fixture package",
+    "name": "endpoint",
+    "status": "installed",
+    "title": "Elastic Defend",
+    "version": "9.2.0"
+  }
+}

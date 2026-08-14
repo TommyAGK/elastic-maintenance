@@ -1,0 +1,12 @@
+{
+  "_meta": {
+    "install_source": "registry",
+    "name": "endpoint"
+  },
+  "items": [
+    {
+      "id": "endpoint-fixture-template",
+      "type": "index_template"
+    }
+  ]
+}

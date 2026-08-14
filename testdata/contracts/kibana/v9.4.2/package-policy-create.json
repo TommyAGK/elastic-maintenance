@@ -1,0 +1,23 @@
+{
+  "item": {
+    "created_at": "2026-01-01T00:00:00.000Z",
+    "created_by": "fixture-user",
+    "description": "[managed-by:elastic-maintainer] fixture",
+    "enabled": true,
+    "id": "package-policy-1",
+    "inputs": [],
+    "name": "endpoint-policy",
+    "namespace": "default",
+    "package": {
+      "name": "endpoint",
+      "title": "Elastic Defend",
+      "version": "9.2.0"
+    },
+    "policy_ids": [
+      "agent-policy-1"
+    ],
+    "revision": 1,
+    "updated_at": "2026-01-01T00:00:00.000Z",
+    "updated_by": "fixture-user"
+  }
+}

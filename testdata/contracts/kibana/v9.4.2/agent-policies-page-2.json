@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "description": "fixture",
+      "id": "unmanaged-agent-policy",
+      "is_managed": false,
+      "is_protected": false,
+      "name": "Unmanaged",
+      "namespace": "default",
+      "revision": 1,
+      "status": "active",
+      "updated_at": "2026-01-01T00:00:00.000Z",
+      "updated_by": "fixture-user"
+    }
+  ],
+  "page": 2,
+  "perPage": 1,
+  "total": 2
+}

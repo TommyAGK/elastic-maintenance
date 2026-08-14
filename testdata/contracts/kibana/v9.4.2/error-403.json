@@ -1,0 +1,5 @@
+{
+  "error": "Forbidden",
+  "message": "Insufficient privileges",
+  "statusCode": 403
+}

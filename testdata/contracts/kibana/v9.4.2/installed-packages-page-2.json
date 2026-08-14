@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "dataStreams": [],
+      "name": "system",
+      "status": "installed",
+      "title": "System",
+      "version": "1.55.0"
+    }
+  ],
+  "total": 2
+}
