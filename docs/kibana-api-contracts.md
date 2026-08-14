@@ -93,3 +93,28 @@ The public operation text does not enumerate explicit privilege names for every 
 - representative authentication, authorization, not-found, conflict, throttling, and server errors.
 
 These fixtures verify parser and request contracts once adapter tests are added. They are not represented as live captures. Live 9.2.0 and 9.4.2 verification remains required by the implementation gate.
+
+## Reproducible verification
+
+Run the repository-only structural, provenance, operation-set, reference, and credential-pattern checks with:
+
+```bash
+python3 scripts/verify-contract-fixtures.py
+```
+
+For pinned OpenAPI response-schema validation, download the two source documents above as `v9.2.0.yaml` and `v9.4.2.yaml`, then run with Python `PyYAML` and `jsonschema` available:
+
+```bash
+python3 scripts/verify-contract-fixtures.py --openapi-dir <download-directory>
+```
+
+Verification on 2026-08-14 confirmed:
+
+- both source SHA-256 values match the pinned documents;
+- all 62 JSON files parse and are referenced appropriately;
+- 48 successful and pagination responses validate against the pinned schemas;
+- both version manifests expose the same required operation set;
+- the 9.2-incompatible unversioned EPM package path is absent; and
+- no forbidden credential keys, authorization values, bearer/API-key values, or private-key blocks occur in the fixture JSON.
+
+The missing explicit privilege names identified above remain a deliberate live-matrix evidence gap, not an inferred contract.
