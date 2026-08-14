@@ -38,6 +38,37 @@ func TestMinimalServerFixtureIsValid(t *testing.T) {
 	}
 }
 
+func TestLoadServerConfigIsReadOnly(t *testing.T) {
+	path := writeConfig(t, readFixture(t))
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadServerConfig(path); err != nil {
+		t.Fatalf("LoadServerConfig() error = %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("LoadServerConfig changed the mounted configuration")
+	}
+}
+
+func TestLoadServerConfigRejectsNonRegularAndOversizedInputs(t *testing.T) {
+	if _, err := LoadServerConfig(t.TempDir()); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("directory LoadServerConfig() error = %v", err)
+	}
+	path := writeConfig(t, strings.Repeat("x", maxServerConfigBytes+1))
+	if _, err := LoadServerConfig(path); err == nil || !strings.Contains(err.Error(), "1 MiB limit") {
+		t.Fatalf("oversized LoadServerConfig() error = %v", err)
+	}
+}
+
 func TestLoadServerConfigUsesSafeDefaults(t *testing.T) {
 	contents := strings.ReplaceAll(readFixture(t), "listen: :8080\n", "")
 	contents = strings.ReplaceAll(contents, "stateDir: /var/lib/elastic-maintainer/state\n", "")
@@ -55,7 +86,7 @@ func TestLoadServerConfigUsesSafeDefaults(t *testing.T) {
 func TestLoadServerConfigRejectsUnknownFields(t *testing.T) {
 	path := writeConfig(t, readFixture(t)+"unexpected: true\n")
 	_, err := LoadServerConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+	if err == nil || !strings.Contains(err.Error(), `unknown field "unexpected"`) {
 		t.Fatalf("LoadServerConfig() error = %v", err)
 	}
 }
@@ -64,8 +95,30 @@ func TestLoadServerConfigRejectsSensitiveTargetFields(t *testing.T) {
 	contents := strings.Replace(readFixture(t), "    resourceSet: production\n", "    resourceSet: production\n    apiKey: forbidden\n", 1)
 	path := writeConfig(t, contents)
 	_, err := LoadServerConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "field apiKey not found") {
+	if err == nil || !strings.Contains(err.Error(), `unknown field "apiKey"`) {
 		t.Fatalf("LoadServerConfig() error = %v", err)
+	}
+}
+
+func TestLoadServerConfigRedactsMalformedCredentialValues(t *testing.T) {
+	const sentinel = "credential-sentinel-must-not-leak"
+	contents := strings.Replace(readFixture(t), "  clientSecret:\n    namespace: elastic-maintainer\n    name: elastic-maintainer-oidc\n    key: client-secret\n", "  clientSecret: "+sentinel+"\n", 1)
+	_, err := LoadServerConfig(writeConfig(t, contents))
+	if err == nil {
+		t.Fatal("LoadServerConfig() error = nil")
+	}
+	if strings.Contains(err.Error(), sentinel) || strings.Contains(err.Error(), "credential-sentinel") {
+		t.Fatalf("LoadServerConfig() leaked malformed credential material: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid YAML") {
+		t.Fatalf("LoadServerConfig() error = %v", err)
+	}
+
+	const crafted = "987654321"
+	contents = strings.Replace(readFixture(t), "  clientSecret:\n    namespace: elastic-maintainer\n    name: elastic-maintainer-oidc\n    key: client-secret\n", "  clientSecret: !!float \"line "+crafted+"\"\n", 1)
+	_, err = LoadServerConfig(writeConfig(t, contents))
+	if err == nil || strings.Contains(err.Error(), crafted) {
+		t.Fatalf("LoadServerConfig() leaked crafted decoder text: %v", err)
 	}
 }
 
@@ -73,7 +126,7 @@ func TestLoadServerConfigRejectsDuplicateKeys(t *testing.T) {
 	contents := strings.Replace(readFixture(t), "stateID: security-platform\n", "stateID: security-platform\nstateID: duplicate\n", 1)
 	path := writeConfig(t, contents)
 	_, err := LoadServerConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "mapping key \"stateID\" already defined") {
+	if err == nil || !strings.Contains(err.Error(), `duplicate key "stateID"`) {
 		t.Fatalf("LoadServerConfig() error = %v", err)
 	}
 }
@@ -174,6 +227,85 @@ func TestApplyStartupOverrides(t *testing.T) {
 	}
 }
 
+func TestTargetIdentityNormalizesURLAndDefaultSpaceWithoutMutation(t *testing.T) {
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cfg.Targets["production-default"]
+	target.URL = "HTTPS://KIBANA.Example.Test:443/"
+	target.Space = ""
+	cfg.Targets["production-default"] = target
+
+	identity, err := cfg.TargetIdentity("production-default")
+	if err != nil {
+		t.Fatalf("TargetIdentity() error = %v", err)
+	}
+	want := TargetIdentity{StateID: "security-platform", Name: "production-default", URL: "https://kibana.example.test", Space: "default"}
+	if identity != want {
+		t.Fatalf("TargetIdentity() = %#v, want %#v", identity, want)
+	}
+	if cfg.Targets["production-default"].URL != target.URL || cfg.Targets["production-default"].Space != "" {
+		t.Fatal("TargetIdentity mutated mounted target configuration")
+	}
+}
+
+func TestTargetIdentityRejectsUnknownOrInvalidTargets(t *testing.T) {
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.TargetIdentity("unknown"); err == nil || !strings.Contains(err.Error(), "is not configured") {
+		t.Fatalf("unknown TargetIdentity() error = %v", err)
+	}
+	target := cfg.Targets["production-default"]
+	target.URL = "http://kibana.example.test"
+	cfg.Targets["production-default"] = target
+	if _, err := cfg.TargetIdentity("production-default"); err == nil || !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Fatalf("unsafe TargetIdentity() error = %v", err)
+	}
+}
+
+func TestValidateStartupRejectsInvalidNamesAndLabels(t *testing.T) {
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.StateID = strings.Repeat("a", 129)
+	cfg.ResourceSets["invalid.name"] = ResourceSetConfig{Path: "/var/lib/elastic-maintainer/sources/invalid"}
+	cfg.Targets["invalid.name"] = TargetConfig{
+		URL:         "https://kibana.example.test",
+		Space:       strings.Repeat("s", 129),
+		ResourceSet: "invalid.name",
+		Labels: map[string]string{
+			"bad key": "value",
+			"valid":   "bad value",
+		},
+		CredentialSecret: SecretReference{Namespace: "elastic-maintainer", Name: "elastic-maintainer-target-invalid"},
+	}
+
+	err = cfg.ValidateStartup()
+	if err == nil {
+		t.Fatal("ValidateStartup() error = nil")
+	}
+	for _, want := range []string{"stateID must be at most 128 characters", "resourceSets contains invalid name", "targets contains invalid name", "space is invalid", "labels contains invalid key", "contains an invalid value"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ValidateStartup() error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestValidateStartupTreatsDefaultPortsAsSameOrigin(t *testing.T) {
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.PublicURL = "https://elastic-maintainer.example.test:443"
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("ValidateStartup() error = %v", err)
+	}
+}
+
 func TestValidateStartupAggregatesSafetyErrors(t *testing.T) {
 	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
 	if err != nil {
@@ -240,6 +372,37 @@ func TestValidateStartupErrorsAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestValidateStartupRejectsRootResolvingToFilesystemRootAndUnresolvedStateSymlink(t *testing.T) {
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootLink := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(string(filepath.Separator), rootLink); err != nil {
+		t.Fatal(err)
+	}
+	cfg.MountRoots = []string{rootLink}
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "mountRoots[0] must not resolve to the filesystem root") {
+		t.Fatalf("root link ValidateStartup() error = %v", err)
+	}
+	cfg.MountRoots = []string{"/var/lib/elastic-maintainer/sources"}
+	cfg.StateDir = rootLink
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "stateDir must not resolve to the filesystem root") {
+		t.Fatalf("state root link ValidateStartup() error = %v", err)
+	}
+
+	parent := t.TempDir()
+	dangling := filepath.Join(parent, "dangling")
+	if err := os.Symlink(filepath.Join(parent, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	cfg.MountRoots = []string{"/var/lib/elastic-maintainer/sources"}
+	cfg.StateDir = dangling
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "stateDir must not traverse an unresolved symlink") {
+		t.Fatalf("dangling state ValidateStartup() error = %v", err)
+	}
+}
+
 func TestValidateStartupRejectsWritableStateAndSourceOverlap(t *testing.T) {
 	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
 	if err != nil {
@@ -256,6 +419,75 @@ func TestValidateStartupRejectsWritableStateAndSourceOverlap(t *testing.T) {
 	}
 }
 
+func TestValidateStartupRejectsCanonicalEquivalentIssuerAndPublicURLs(t *testing.T) {
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.PublicURL = "https://IDENTITY.example.test:443/"
+	cfg.OIDC.RedirectURL = "https://identity.example.test/auth/callback"
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "oidc.issuerURL must not equal publicURL") {
+		t.Fatalf("ValidateStartup() error = %v", err)
+	}
+}
+
+func TestValidateStartupRejectsResolvedPathOverlapAndEscape(t *testing.T) {
+	parent := t.TempDir()
+	mountRoot := filepath.Join(parent, "mount")
+	resourceRoot := filepath.Join(mountRoot, "production")
+	stateRoot := filepath.Join(mountRoot, "state")
+	outsideRoot := filepath.Join(parent, "outside")
+	for _, path := range []string{resourceRoot, stateRoot, outsideRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stateLink := filepath.Join(parent, "state-link")
+	if err := os.Symlink(stateRoot, stateLink); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MountRoots = []string{mountRoot}
+	cfg.StateDir = stateLink
+	set := cfg.ResourceSets["production"]
+	set.Path = resourceRoot
+	cfg.ResourceSets["production"] = set
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "must not overlap") {
+		t.Fatalf("resolved overlap ValidateStartup() error = %v", err)
+	}
+
+	escapedRoot := filepath.Join(mountRoot, "escaped")
+	if err := os.Symlink(outsideRoot, escapedRoot); err != nil {
+		t.Fatal(err)
+	}
+	cfg.StateDir = filepath.Join(parent, "safe-state")
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	set.Path = escapedRoot
+	cfg.ResourceSets["production"] = set
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "must be within a configured mount root") {
+		t.Fatalf("resolved escape ValidateStartup() error = %v", err)
+	}
+}
+
+func TestValidateStartupRejectsDotRevisionPath(t *testing.T) {
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := cfg.ResourceSets["production"]
+	set.RevisionFile = "."
+	cfg.ResourceSets["production"] = set
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "revisionFile must be a clean relative path") {
+		t.Fatalf("ValidateStartup() error = %v", err)
+	}
+}
+
 func TestValidateStartupRejectsOIDCRedirectOnAnotherOrigin(t *testing.T) {
 	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
 	if err != nil {
@@ -264,6 +496,29 @@ func TestValidateStartupRejectsOIDCRedirectOnAnotherOrigin(t *testing.T) {
 	cfg.OIDC.RedirectURL = "https://other.example.test/auth/callback"
 	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "oidc.redirectURL must have the same origin") {
 		t.Fatalf("ValidateStartup() error = %v", err)
+	}
+}
+
+func TestValidateStartupRejectsUnsafeTargetURLs(t *testing.T) {
+	for name, rawURL := range map[string]string{
+		"non-loopback HTTP": "http://kibana.example.test",
+		"missing host":      "https://:443",
+		"invalid port":      "https://kibana.example.test:0",
+		"credentials":       "https://user:password@kibana.example.test",
+		"query":             "https://kibana.example.test?token=forbidden",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := cfg.Targets["production-default"]
+			target.URL = rawURL
+			cfg.Targets["production-default"] = target
+			if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "targets.production-default.url") {
+				t.Fatalf("ValidateStartup() error = %v", err)
+			}
+		})
 	}
 }
 

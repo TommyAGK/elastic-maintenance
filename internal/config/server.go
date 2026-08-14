@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,13 +23,19 @@ const (
 	DefaultConfigPath    = "/etc/elastic-maintainer/elastic-maintainer.yaml"
 	DefaultListenAddress = ":8080"
 	DefaultStateDir      = "/var/lib/elastic-maintainer/state"
+	maxServerConfigBytes = 1 << 20
 )
 
 var (
-	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
-	dnsLabelPattern   = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
-	secretKeyPattern  = regexp.MustCompile(`^[-._A-Za-z0-9]+$`)
-	allowedRoles      = map[string]struct{}{
+	identifierPattern         = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
+	resourceIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$`)
+	labelKeyPattern           = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`)
+	labelValuePattern         = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?$`)
+	dnsLabelPattern           = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
+	secretKeyPattern          = regexp.MustCompile(`^[-._A-Za-z0-9]+$`)
+	yamlUnknownFieldPattern   = regexp.MustCompile(`^line [0-9]+: field ([A-Za-z0-9_.-]{1,128}) not found in type .+$`)
+	yamlDuplicateKeyPattern   = regexp.MustCompile(`^line [0-9]+: mapping key "([A-Za-z0-9_.-]{1,128})" already defined at line [0-9]+$`)
+	allowedRoles              = map[string]struct{}{
 		"viewer": {}, "planner": {}, "applier": {}, "administrator": {},
 	}
 )
@@ -89,6 +96,13 @@ type TargetConfig struct {
 	CredentialSecret SecretReference   `yaml:"credentialSecret"`
 }
 
+type TargetIdentity struct {
+	StateID string
+	Name    string
+	URL     string
+	Space   string
+}
+
 type SecretReference struct {
 	Namespace string `yaml:"namespace"`
 	Name      string `yaml:"name"`
@@ -137,17 +151,48 @@ func ParseStartupOptions(args []string, lookup LookupEnv) (StartupOptions, error
 }
 
 func LoadServerConfig(path string) (*ServerConfig, error) {
+	before, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect server config: %w", err)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, errors.New("inspect server config: path must resolve to a regular file")
+	}
+	if before.Size() > maxServerConfigBytes {
+		return nil, errors.New("read server config: file exceeds the 1 MiB limit")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open server config: %w", err)
 	}
 	defer file.Close()
+	after, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect open server config: %w", err)
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return nil, errors.New("open server config: file changed while opening")
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maxServerConfigBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read server config: %w", err)
+	}
+	if len(contents) > maxServerConfigBytes {
+		return nil, errors.New("read server config: file exceeds the 1 MiB limit")
+	}
+	final, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect read server config: %w", err)
+	}
+	if final.Size() != after.Size() || !final.ModTime().Equal(after.ModTime()) {
+		return nil, errors.New("read server config: file changed while reading")
+	}
 
 	cfg := &ServerConfig{Listen: DefaultListenAddress, StateDir: DefaultStateDir}
-	decoder := yaml.NewDecoder(file)
+	decoder := yaml.NewDecoder(bytes.NewReader(contents))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(cfg); err != nil {
-		return nil, fmt.Errorf("decode server config: %w", err)
+		return nil, fmt.Errorf("decode server config: %w", sanitizeYAMLDecodeError(err))
 	}
 
 	var extra yaml.Node
@@ -155,9 +200,24 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 		if err == nil {
 			return nil, errors.New("decode server config: multiple YAML documents are not allowed")
 		}
-		return nil, fmt.Errorf("decode server config: %w", err)
+		return nil, fmt.Errorf("decode server config: %w", sanitizeYAMLDecodeError(err))
 	}
 	return cfg, nil
+}
+
+func sanitizeYAMLDecodeError(err error) error {
+	var typeError *yaml.TypeError
+	if errors.As(err, &typeError) {
+		for _, issue := range typeError.Errors {
+			if match := yamlUnknownFieldPattern.FindStringSubmatch(issue); len(match) == 2 {
+				return fmt.Errorf("unknown field %q", match[1])
+			}
+			if match := yamlDuplicateKeyPattern.FindStringSubmatch(issue); len(match) == 2 {
+				return fmt.Errorf("duplicate key %q", match[1])
+			}
+		}
+	}
+	return errors.New("invalid YAML")
 }
 
 func (cfg *ServerConfig) ApplyStartupOverrides(options StartupOptions) {
@@ -172,6 +232,31 @@ func (cfg *ServerConfig) ApplyStartupOverrides(options StartupOptions) {
 	}
 }
 
+func (cfg *ServerConfig) TargetIdentity(name string) (TargetIdentity, error) {
+	if cfg == nil {
+		return TargetIdentity{}, errors.New("server config is nil")
+	}
+	if !resourceIdentifierPattern.MatchString(name) {
+		return TargetIdentity{}, errors.New("target name is invalid")
+	}
+	target, ok := cfg.Targets[name]
+	if !ok {
+		return TargetIdentity{}, fmt.Errorf("target %q is not configured", name)
+	}
+	normalizedURL, err := normalizeTargetURL(target.URL)
+	if err != nil {
+		return TargetIdentity{}, fmt.Errorf("target %q URL: %w", name, err)
+	}
+	space := target.Space
+	if space == "" {
+		space = "default"
+	}
+	if len(cfg.StateID) > 128 || !identifierPattern.MatchString(cfg.StateID) || len(space) > 128 || !identifierPattern.MatchString(space) {
+		return TargetIdentity{}, fmt.Errorf("target %q identity is invalid", name)
+	}
+	return TargetIdentity{StateID: cfg.StateID, Name: name, URL: normalizedURL, Space: space}, nil
+}
+
 func (cfg *ServerConfig) ValidateStartup() error {
 	var problems []string
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
@@ -179,8 +264,8 @@ func (cfg *ServerConfig) ValidateStartup() error {
 	if cfg.APIVersion != ServerAPIVersion {
 		add("apiVersion must be %q", ServerAPIVersion)
 	}
-	if !identifierPattern.MatchString(cfg.StateID) {
-		add("stateID must use letters, digits, underscore, dot, or dash and start with a letter, digit, or underscore")
+	if len(cfg.StateID) > 128 || !identifierPattern.MatchString(cfg.StateID) {
+		add("stateID must be at most 128 characters, use letters, digits, underscore, dot, or dash, and start with a letter, digit, or underscore")
 	}
 	publicURL, err := validateHTTPSURL("publicURL", cfg.PublicURL, true)
 	if err != nil {
@@ -193,6 +278,10 @@ func (cfg *ServerConfig) ValidateStartup() error {
 	}
 	if err := validateAbsoluteDir("stateDir", cfg.StateDir); err != nil {
 		add("%v", err)
+	} else if resolved, err := filepath.EvalSymlinks(cfg.StateDir); err == nil && resolved == string(filepath.Separator) {
+		add("stateDir must not resolve to the filesystem root")
+	} else if err != nil && hasUnresolvedSymlink(cfg.StateDir) {
+		add("stateDir must not traverse an unresolved symlink")
 	}
 
 	seenRoots := map[string]struct{}{}
@@ -205,11 +294,16 @@ func (cfg *ServerConfig) ValidateStartup() error {
 			continue
 		}
 		clean := filepath.Clean(root)
+		if resolved, err := filepath.EvalSymlinks(clean); err == nil && resolved == string(filepath.Separator) {
+			add("mountRoots[%d] must not resolve to the filesystem root", index)
+		} else if err != nil && hasUnresolvedSymlink(clean) {
+			add("mountRoots[%d] must not traverse an unresolved symlink", index)
+		}
 		if _, exists := seenRoots[clean]; exists {
 			add("mountRoots contains duplicate path %q", clean)
 		}
 		seenRoots[clean] = struct{}{}
-		if filepath.IsAbs(cfg.StateDir) && pathsOverlap(cfg.StateDir, clean) {
+		if filepath.IsAbs(cfg.StateDir) && (pathsOverlap(cfg.StateDir, clean) || resolvedPathsOverlap(cfg.StateDir, clean)) {
 			add("stateDir and mountRoots[%d] must not overlap", index)
 		}
 	}
@@ -245,7 +339,7 @@ func (cfg *ServerConfig) ValidateStartup() error {
 			add("oidc.redirectURL path must be /auth/callback")
 		}
 	}
-	if issuerURL != nil && publicURL != nil && issuerURL.String() == publicURL.String() {
+	if issuerURL != nil && publicURL != nil && canonicalURL(issuerURL) == canonicalURL(publicURL) {
 		add("oidc.issuerURL must not equal publicURL")
 	}
 	hasOpenIDScope := false
@@ -306,22 +400,24 @@ func (cfg *ServerConfig) ValidateStartup() error {
 
 	for _, name := range sortedStringKeys(cfg.ResourceSets) {
 		set := cfg.ResourceSets[name]
-		if !identifierPattern.MatchString(name) {
+		if !resourceIdentifierPattern.MatchString(name) {
 			add("resourceSets contains invalid name %q", name)
 		}
 		if err := validateAbsoluteDir("resourceSets."+name+".path", set.Path); err != nil {
 			add("%v", err)
-		} else if !pathWithinAny(set.Path, cfg.MountRoots) {
+		} else if hasUnresolvedSymlink(set.Path) {
+			add("resourceSets.%s.path must not traverse an unresolved symlink", name)
+		} else if !pathWithinAny(set.Path, cfg.MountRoots) || resolvedPathEscapesRoots(set.Path, cfg.MountRoots) {
 			add("resourceSets.%s.path must be within a configured mount root", name)
 		}
 		cleanRevision := filepath.Clean(set.RevisionFile)
-		if set.RevisionFile != "" && (filepath.IsAbs(set.RevisionFile) || cleanRevision != set.RevisionFile || cleanRevision == ".." || strings.HasPrefix(cleanRevision, ".."+string(filepath.Separator))) {
+		if set.RevisionFile != "" && (filepath.IsAbs(set.RevisionFile) || cleanRevision != set.RevisionFile || cleanRevision == "." || cleanRevision == ".." || strings.HasPrefix(cleanRevision, ".."+string(filepath.Separator))) {
 			add("resourceSets.%s.revisionFile must be a clean relative path", name)
 		}
 	}
 	for _, name := range sortedStringKeys(cfg.Targets) {
 		target := cfg.Targets[name]
-		if !identifierPattern.MatchString(name) {
+		if !resourceIdentifierPattern.MatchString(name) {
 			add("targets contains invalid name %q", name)
 		}
 		if _, err := validateHTTPSURL("targets."+name+".url", target.URL, true); err != nil {
@@ -331,10 +427,10 @@ func (cfg *ServerConfig) ValidateStartup() error {
 		if space == "" {
 			space = "default"
 		}
-		if !identifierPattern.MatchString(space) {
+		if len(space) > 128 || !identifierPattern.MatchString(space) {
 			add("targets.%s.space is invalid", name)
 		}
-		if !identifierPattern.MatchString(target.ResourceSet) {
+		if !resourceIdentifierPattern.MatchString(target.ResourceSet) {
 			add("targets.%s.resourceSet is invalid", name)
 		} else if _, exists := cfg.ResourceSets[target.ResourceSet]; !exists {
 			add("targets.%s.resourceSet references an unknown resource set", name)
@@ -345,9 +441,15 @@ func (cfg *ServerConfig) ValidateStartup() error {
 		if !strings.HasPrefix(target.CredentialSecret.Name, cfg.SecretPolicy.NamePrefix) || !isKubernetesSecretName(target.CredentialSecret.Name) {
 			add("targets.%s.credentialSecret.name must be a valid Kubernetes Secret name using the configured owned prefix", name)
 		}
+		if len(target.Labels) > 64 {
+			add("targets.%s.labels must contain at most 64 entries", name)
+		}
 		for _, key := range sortedStringKeys(target.Labels) {
-			if !identifierPattern.MatchString(key) {
+			if !labelKeyPattern.MatchString(key) {
 				add("targets.%s.labels contains invalid key %q", name, key)
+			}
+			if !labelValuePattern.MatchString(target.Labels[key]) {
+				add("targets.%s.labels.%s contains an invalid value", name, key)
 			}
 		}
 	}
@@ -396,15 +498,46 @@ func validateAbsoluteDir(field, path string) error {
 
 func validateHTTPSURL(field, raw string, allowLoopbackHTTP bool) (*url.URL, error) {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || strings.HasSuffix(parsed.Host, ":") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("%s must be an absolute URL without credentials, query, or fragment", field)
 	}
-	if parsed.Scheme != "https" {
-		if !(allowLoopbackHTTP && parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		if !(allowLoopbackHTTP && strings.EqualFold(parsed.Scheme, "http") && isLoopbackHost(parsed.Hostname())) {
 			return nil, fmt.Errorf("%s must use HTTPS except for loopback development", field)
 		}
 	}
+	if port := parsed.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65535 {
+			return nil, fmt.Errorf("%s contains an invalid port", field)
+		}
+	}
 	return parsed, nil
+}
+
+func normalizeTargetURL(raw string) (string, error) {
+	parsed, err := validateHTTPSURL("target URL", raw, true)
+	if err != nil {
+		return "", err
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	hostname := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if strings.Contains(hostname, ":") {
+		hostname = "[" + hostname + "]"
+	}
+	parsed.Host = hostname
+	if port != "" {
+		parsed.Host += ":" + port
+	}
+	if parsed.Path == "/" {
+		parsed.Path = ""
+		parsed.RawPath = ""
+	}
+	return parsed.String(), nil
 }
 
 func validateOrigin(raw string) (*url.URL, error) {
@@ -427,7 +560,34 @@ func isLoopbackHost(host string) bool {
 }
 
 func sameOrigin(left, right *url.URL) bool {
-	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
+	return canonicalOrigin(left) == canonicalOrigin(right)
+}
+
+func canonicalOrigin(value *url.URL) string {
+	scheme := strings.ToLower(value.Scheme)
+	hostname := strings.ToLower(value.Hostname())
+	port := value.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if strings.Contains(hostname, ":") {
+		hostname = "[" + hostname + "]"
+	}
+	if port != "" {
+		hostname += ":" + port
+	}
+	return scheme + "://" + hostname
+}
+
+func canonicalURL(value *url.URL) string {
+	copy := *value
+	copy.Scheme = strings.ToLower(copy.Scheme)
+	copy.Host = strings.TrimPrefix(canonicalOrigin(value), copy.Scheme+"://")
+	if copy.Path == "/" {
+		copy.Path = ""
+		copy.RawPath = ""
+	}
+	return copy.String()
 }
 
 func validateSecretKeyRef(field string, ref SecretKeyRef, problems *[]string) {
@@ -477,6 +637,52 @@ func pathWithinAny(path string, roots []string) bool {
 
 func pathsOverlap(left, right string) bool {
 	return pathWithin(left, right) || pathWithin(right, left)
+}
+
+func hasUnresolvedSymlink(path string) bool {
+	if _, err := filepath.EvalSymlinks(path); err == nil {
+		return false
+	}
+	current := string(filepath.Separator)
+	for _, component := range strings.Split(strings.TrimPrefix(filepath.Clean(path), string(filepath.Separator)), string(filepath.Separator)) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return false
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvedPathsOverlap(left, right string) bool {
+	resolvedLeft, leftErr := filepath.EvalSymlinks(left)
+	resolvedRight, rightErr := filepath.EvalSymlinks(right)
+	return leftErr == nil && rightErr == nil && pathsOverlap(resolvedLeft, resolvedRight)
+}
+
+func resolvedPathEscapesRoots(path string, roots []string) bool {
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	resolvedAnyRoot := false
+	for _, root := range roots {
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			continue
+		}
+		resolvedAnyRoot = true
+		if pathWithin(resolvedPath, resolvedRoot) {
+			return false
+		}
+	}
+	return resolvedAnyRoot
 }
 
 func pathWithin(path, root string) bool {

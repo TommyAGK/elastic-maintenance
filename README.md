@@ -4,7 +4,7 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository has passed the **Phase 0: API-server migration skeleton** gate and is not production-ready. Phase 1 mounted-input and validation work has not started. The superseded CLI has been replaced by a strict server entry point and HTTP routing skeleton with health, readiness, a versioned OpenAPI contract, request-safety middleware, deny-by-default authentication, centralized RBAC, and asynchronous validation/plan/apply job contracts. The active direction is defined by:
+The repository has passed the **Phase 0: API-server migration skeleton** gate and is not production-ready. Phase 1 mounted-input and validation work is underway. The superseded CLI has been replaced by a strict server entry point and HTTP routing skeleton with health, readiness, a versioned OpenAPI contract, request-safety middleware, deny-by-default authentication, centralized RBAC, and asynchronous validation/plan/apply job contracts. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`

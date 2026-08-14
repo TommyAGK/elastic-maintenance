@@ -9,6 +9,10 @@ Implement authoritative read-only mounted configuration/resource sets and expose
 - Phase 0 server/API skeleton passes.
 - Mounted configuration and resource-set schemas in `plan.md` are approved.
 
+## Current status
+
+Substeps 1.1 and 1.2 are implemented. Strict configuration decoding rejects unknown, duplicate, multi-document, and credential-bearing configuration; startup validation bounds canonical identifiers and labels, enforces mount/Secret policy and HTTPS-or-loopback URL rules, and derives immutable normalized target identities. Resource-set discovery resolves configured roots within mounted boundaries, reads `.yaml`/`.yml` files in lexical order under explicit limits, rejects symlinks/special files/escapes, returns safe relative locations, and validates bounded single-line revision metadata. Strict resource-envelope decoding begins in substep 1.3.
+
 ## Substeps
 
 ### 1.1 Implement strict server/target configuration
