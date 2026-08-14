@@ -1,0 +1,56 @@
+apiVersion: elastic-maintainer/v1alpha1
+stateID: security-platform
+publicURL: https://elastic-maintainer.example.test
+listen: :8080
+stateDir: /var/lib/elastic-maintainer/state
+trustedProxies:
+  - 10.0.0.0/8
+corsAllowedOrigins:
+  - https://automation.example.test
+mountRoots:
+  - /var/lib/elastic-maintainer/sources
+oidc:
+  issuerURL: https://identity.example.test
+  clientID: elastic-maintainer
+  clientSecret:
+    namespace: elastic-maintainer
+    name: elastic-maintainer-oidc
+    key: client-secret
+  sessionSecret:
+    namespace: elastic-maintainer
+    name: elastic-maintainer-session
+    key: session-key
+  redirectURL: https://elastic-maintainer.example.test/auth/callback
+  scopes:
+    - openid
+    - profile
+  subjectClaim: sub
+  displayNameClaim: name
+authorization:
+  roleClaim: groups
+  roleMappings:
+    viewer:
+      - elastic-maintainer-viewers
+    planner:
+      - elastic-maintainer-planners
+    applier:
+      - elastic-maintainer-appliers
+    administrator:
+      - elastic-maintainer-administrators
+secretPolicy:
+  namespace: elastic-maintainer
+  namePrefix: elastic-maintainer-target-
+resourceSets:
+  production:
+    path: /var/lib/elastic-maintainer/sources/production
+    revisionFile: .source-revision
+targets:
+  production-default:
+    url: https://kibana.example.test
+    space: default
+    labels:
+      environment: production
+    resourceSet: production
+    credentialSecret:
+      namespace: elastic-maintainer
+      name: elastic-maintainer-target-production-default
