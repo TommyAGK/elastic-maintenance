@@ -1,5 +1,7 @@
 # Phase 0 prototype baseline
 
+> Historical implementation inventory only. The accepted replacement architecture is `docs/architecture/0001-web-first-api.md`.
+
 Recorded on the `feat/prototype-replacement-skeleton` branch before replacement work.
 
 ## Verification

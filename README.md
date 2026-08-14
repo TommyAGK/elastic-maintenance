@@ -1,34 +1,55 @@
-# Elastic Maintenance
+# Elastic Maintainer
 
-Go-based maintenance utility for Elastic Security in Kibana.
+Elastic Maintainer is being rebuilt as a web-first reconciliation service for Elastic Security configuration in Kibana 9.x.
 
-It supports:
+## Status
 
-- reviewing current integrations, Fleet policies, and rules
-- installing missing assets
-- updating drifted assets
-- packaging the tool for Kubernetes execution
+The repository is in **Phase 0: API-server migration skeleton**. The tracked Go code is still the superseded CLI prototype and is not production-ready. The active implementation direction is defined by:
 
-## Layout
+- Primary plan: `plan.md`
+- Accepted architecture decision: `docs/architecture/0001-web-first-api.md`
+- Current phase sub-plan: `docs/implementation/subplans/phase-0-contract-fixtures-and-api-server-migration-skeleton.md`
+- Kibana contract baseline: `docs/kibana-api-contracts.md`
 
-- `cmd/elastic-maintenance`: CLI entrypoint
-- `internal/config`: desired-state configuration models
-- `internal/kibana`: Kibana API client and reconciliation helpers
-- `internal/reconcile`: diff/apply planning
-- `deploy/kubernetes`: manifests for running the tool in-cluster
+## Target architecture
 
-## Test coverage
+- Long-running, single-replica Go API service deployed to Kubernetes.
+- Embedded web UI as the primary operator experience.
+- Versioned `/api/v1` REST API and OpenAPI contract for external automation.
+- Application-level OIDC authentication with viewer, planner, applier, and administrator roles.
+- Mounted Git/YAML resource sets remain authoritative and read-only.
+- Each Kibana target is assigned to one mounted resource set, allowing external orchestration to mount separate branches or revisions.
+- Administrators upload Kibana API keys and CA trust bundles through the protected UI/API; the service stores them in owned Kubernetes Secrets.
+- Non-secret plans, jobs, reports, audit records, and managed-resource inventory are stored as versioned JSON on a ReadWriteOnce PVC.
+- Docker and Kubernetes are production delivery mechanisms. `start-web.sh` is local test tooling only and is not currently tracked.
 
-The project includes both unit tests and integration-style tests.
+## Supported v1 resources
 
-- Unit tests cover:
-  - desired-state config loading
-  - Kibana client request helpers and error handling
-  - CLI flag validation
-  - reconciliation planning and report formatting
-  - mock server request recording
-- Integration-style tests cover:
-  - review mode against the mock Kibana server
-  - apply mode against the mock Kibana server
-  - end-to-end request flow through the real client and reconciler
+- Integration packages
+- Fleet agent policies
+- Fleet package policies
+- Custom detection rules
+- Collective Elastic prebuilt rules
 
+Compatibility target: stable Kibana releases `>=9.2.0,<10.0.0` using documented public APIs only.
+
+## Source-of-truth boundary
+
+The service does not clone, fetch, poll, edit, or commit Git repositories. GitOps or another external orchestrator mounts branch/revision content as read-only resource-set directories. The service validates, plans, and applies only explicit operator requests against those mounted snapshots.
+
+## Security boundary
+
+- Production access uses a TLS Kubernetes Ingress and application-level OIDC.
+- The service never returns uploaded Kibana credentials or CA certificate bodies.
+- Credential values must not enter PVC state, plans, reports, audit records, logs, or browser storage.
+- V1 is intentionally single-replica because JSON/PVC state has a single-writer design.
+
+## Development baseline
+
+The pre-migration prototype tests currently run with:
+
+```bash
+go test ./...
+```
+
+Do not treat the current prototype command, JSON desired-state example, Dockerfile, or Kubernetes Job as the final interface. They will be replaced incrementally under the Phase 0 gate.
