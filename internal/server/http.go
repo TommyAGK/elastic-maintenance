@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -158,6 +159,9 @@ func NewHandler(options HandlerOptions) http.Handler {
 
 	protectedMux := http.NewServeMux()
 	protectedMux.Handle("/api/v1/session", authorize(authorizer, auth.PermissionSessionRead, http.HandlerFunc(sessionHandler)))
+	protectedMux.Handle("/api/v1/validations", authorize(authorizer, auth.PermissionValidationsCreate, mutationJobPlaceholder("validation")))
+	protectedMux.Handle("/api/v1/plans", authorize(authorizer, auth.PermissionPlansCreate, mutationJobPlaceholder("plan")))
+	protectedMux.Handle("/api/v1/plans/", planSubresourceHandler(authorizer))
 	protectedMux.HandleFunc("/api/v1", protectedNotFound)
 	protectedMux.HandleFunc("/api/v1/", protectedNotFound)
 	protectedAPI := authenticate(authenticator, protectedMux)
@@ -197,6 +201,36 @@ func sessionHandler(w http.ResponseWriter, request *http.Request) {
 
 func protectedNotFound(w http.ResponseWriter, request *http.Request) {
 	api.WriteError(w, request, http.StatusNotFound, "not_found", "route not found", RequestID(request.Context()))
+}
+
+func mutationJobPlaceholder(jobType string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !allowMethods(w, request, http.MethodPost) {
+			return
+		}
+		mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			api.WriteError(w, request, http.StatusUnsupportedMediaType, "json_required", "Content-Type must be application/json", RequestID(request.Context()))
+			return
+		}
+		if _, err := api.IdempotencyKey(request); err != nil {
+			api.WriteError(w, request, http.StatusBadRequest, "invalid_idempotency_key", "a valid Idempotency-Key header is required", RequestID(request.Context()))
+			return
+		}
+		api.WriteError(w, request, http.StatusNotImplemented, "job_execution_not_implemented", jobType+" job execution is not implemented yet", RequestID(request.Context()))
+	})
+}
+
+func planSubresourceHandler(authorizer auth.Authorizer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/plans/")
+		parts := strings.Split(remainder, "/")
+		if len(parts) != 2 || !requestIDPattern.MatchString(parts[0]) || parts[1] != "apply" {
+			protectedNotFound(w, request)
+			return
+		}
+		authorize(authorizer, auth.PermissionPlansApply, mutationJobPlaceholder("apply")).ServeHTTP(w, request)
+	})
 }
 
 func authenticate(authenticator auth.Authenticator, next http.Handler) http.Handler {

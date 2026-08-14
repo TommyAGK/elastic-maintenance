@@ -140,6 +140,68 @@ func TestProtectedRouteAuthenticationErrorsRemainGeneric(t *testing.T) {
 	}
 }
 
+func TestMutationJobPlaceholdersEnforceRoleAndRequestContract(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		roles       []auth.Role
+		method      string
+		path        string
+		contentType string
+		key         string
+		wantStatus  int
+		wantCode    string
+	}{
+		"validation planner":   {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/validations", contentType: "application/json", key: "validation-request-1", wantStatus: http.StatusNotImplemented, wantCode: "job_execution_not_implemented"},
+		"plan planner":         {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/plans", contentType: "application/json; charset=utf-8", key: "plan-request-1", wantStatus: http.StatusNotImplemented, wantCode: "job_execution_not_implemented"},
+		"apply applier":        {roles: []auth.Role{auth.RoleApplier}, method: http.MethodPost, path: "/api/v1/plans/plan-1/apply", contentType: "application/json", key: "apply-request-1", wantStatus: http.StatusNotImplemented, wantCode: "job_execution_not_implemented"},
+		"viewer denied":        {roles: []auth.Role{auth.RoleViewer}, method: http.MethodPost, path: "/api/v1/plans", contentType: "application/json", key: "plan-request-1", wantStatus: http.StatusForbidden, wantCode: "permission_denied"},
+		"planner cannot apply": {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/plans/plan-1/apply", contentType: "application/json", key: "apply-request-1", wantStatus: http.StatusForbidden, wantCode: "permission_denied"},
+		"missing key":          {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/plans", contentType: "application/json", wantStatus: http.StatusBadRequest, wantCode: "invalid_idempotency_key"},
+		"wrong content type":   {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/plans", contentType: "text/plain", key: "plan-request-1", wantStatus: http.StatusUnsupportedMediaType, wantCode: "json_required"},
+		"wrong method":         {roles: []auth.Role{auth.RolePlanner}, method: http.MethodGet, path: "/api/v1/plans", contentType: "application/json", key: "plan-request-1", wantStatus: http.StatusMethodNotAllowed, wantCode: "method_not_allowed"},
+		"unknown plan path":    {roles: []auth.Role{auth.RoleApplier}, method: http.MethodPost, path: "/api/v1/plans/plan-1/resume", contentType: "application/json", key: "apply-request-1", wantStatus: http.StatusNotFound, wantCode: "not_found"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			handler := NewHandler(HandlerOptions{
+				Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator-1", Roles: testCase.roles}},
+			})
+			request := httptest.NewRequest(testCase.method, testCase.path, strings.NewReader(`{}`))
+			if testCase.contentType != "" {
+				request.Header.Set("Content-Type", testCase.contentType)
+			}
+			if testCase.key != "" {
+				request.Header.Set(api.IdempotencyKeyHeader, testCase.key)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != testCase.wantStatus {
+				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+			var envelope api.ErrorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Error.Code != testCase.wantCode {
+				t.Fatalf("error=%#v", envelope.Error)
+			}
+			if strings.Contains(response.Body.String(), testCase.key) && testCase.key != "" {
+				t.Fatal("response echoed idempotency key")
+			}
+		})
+	}
+}
+
+func TestMutationJobPlaceholderIsDeniedWithoutAuthentication(t *testing.T) {
+	handler := NewHandler(HandlerOptions{})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/plans", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(api.IdempotencyKeyHeader, "plan-request-1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
 func TestOpenAPIEndpoint(t *testing.T) {
 	handler := NewHandler(HandlerOptions{})
 	response := httptest.NewRecorder()

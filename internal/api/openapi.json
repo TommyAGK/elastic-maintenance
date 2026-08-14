@@ -57,9 +57,80 @@
           "403": {"description": "Permission is denied"}
         }
       }
+    },
+    "/api/v1/validations": {
+      "post": {
+        "operationId": "createValidationJob",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ValidationCreateRequest"}}}
+        },
+        "responses": {
+          "202": {"$ref": "#/components/responses/JobAccepted"},
+          "400": {"description": "Invalid idempotency key"},
+          "401": {"description": "Authentication is required"},
+          "403": {"description": "Permission is denied"},
+          "415": {"description": "JSON content type is required"},
+          "501": {"description": "Validation execution is not implemented in the skeleton"}
+        }
+      }
+    },
+    "/api/v1/plans": {
+      "post": {
+        "operationId": "createPlanJob",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlanCreateRequest"}}}
+        },
+        "responses": {
+          "202": {"$ref": "#/components/responses/JobAccepted"},
+          "400": {"description": "Invalid idempotency key"},
+          "401": {"description": "Authentication is required"},
+          "403": {"description": "Permission is denied"},
+          "415": {"description": "JSON content type is required"},
+          "501": {"description": "Plan execution is not implemented in the skeleton"}
+        }
+      }
+    },
+    "/api/v1/plans/{planId}/apply": {
+      "post": {
+        "operationId": "createApplyJob",
+        "parameters": [
+          {"name": "planId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"$ref": "#/components/parameters/IdempotencyKey"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApplyCreateRequest"}}}
+        },
+        "responses": {
+          "202": {"$ref": "#/components/responses/JobAccepted"},
+          "400": {"description": "Invalid idempotency key"},
+          "401": {"description": "Authentication is required"},
+          "403": {"description": "Permission is denied"},
+          "415": {"description": "JSON content type is required"},
+          "501": {"description": "Apply execution is not implemented in the skeleton"}
+        }
+      }
     }
   },
   "components": {
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": {"type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"}
+      }
+    },
+    "responses": {
+      "JobAccepted": {
+        "description": "Job accepted",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobAcceptedResponse"}}}
+      }
+    },
     "schemas": {
       "Session": {
         "type": "object",
@@ -73,6 +144,48 @@
             "items": {"type": "string", "enum": ["viewer", "planner", "applier", "administrator"]}
           }
         }
+      },
+      "ValidationCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "resourceSetIds": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "targetIds": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        }
+      },
+      "PlanCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["targetIds"],
+        "properties": {
+          "targetIds": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true}
+        }
+      },
+      "ApplyCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["confirm"],
+        "properties": {"confirm": {"type": "boolean", "enum": [true]}}
+      },
+      "Job": {
+        "type": "object",
+        "required": ["id", "type", "status", "createdAt", "actorSubject", "requestId"],
+        "properties": {
+          "id": {"type": "string"},
+          "type": {"type": "string", "enum": ["validation", "plan", "apply"]},
+          "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "canceled", "interrupted"]},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "startedAt": {"type": "string", "format": "date-time"},
+          "finishedAt": {"type": "string", "format": "date-time"},
+          "actorSubject": {"type": "string"},
+          "requestId": {"type": "string"},
+          "failureCode": {"type": "string"}
+        }
+      },
+      "JobAcceptedResponse": {
+        "type": "object",
+        "required": ["job"],
+        "properties": {"job": {"$ref": "#/components/schemas/Job"}}
       },
       "ErrorEnvelope": {
         "type": "object",
