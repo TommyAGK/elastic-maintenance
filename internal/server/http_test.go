@@ -197,6 +197,40 @@ func TestMutationJobPlaceholderIsDeniedWithoutAuthentication(t *testing.T) {
 	}
 }
 
+func TestEmbeddedWebInterfaceRoutesAndSecurityHeaders(t *testing.T) {
+	handler := NewHandler(HandlerOptions{})
+	for _, testCase := range []struct{ path, contentType, contains string }{
+		{path: "/", contentType: "text/html; charset=utf-8", contains: "Elastic Maintainer"},
+		{path: "/sources", contentType: "text/html; charset=utf-8", contains: "External GitOps owns desired state"},
+		{path: "/assets/app.css", contentType: "text/css; charset=utf-8", contains: ":root"},
+		{path: "/assets/app.js", contentType: "text/javascript; charset=utf-8", contains: "/api/v1/validations"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, testCase.path, nil))
+		if response.Code != http.StatusOK || response.Header().Get("Content-Type") != testCase.contentType || !strings.Contains(response.Body.String(), testCase.contains) {
+			t.Errorf("GET %s status=%d type=%q body=%q", testCase.path, response.Code, response.Header().Get("Content-Type"), response.Body.String())
+		}
+		if !strings.Contains(response.Header().Get("Content-Security-Policy"), "default-src 'none'") || response.Header().Get("X-Frame-Options") != "DENY" || response.Header().Get("Referrer-Policy") != "no-referrer" {
+			t.Errorf("GET %s security headers = %#v", testCase.path, response.Header())
+		}
+	}
+	head := httptest.NewRecorder()
+	handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/", nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Fatalf("HEAD / status=%d body=%q", head.Code, head.Body.String())
+	}
+	wrongMethod := httptest.NewRecorder()
+	handler.ServeHTTP(wrongMethod, httptest.NewRequest(http.MethodPost, "/assets/app.js", nil))
+	if wrongMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST asset status=%d", wrongMethod.Code)
+	}
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/assets/missing.js", nil))
+	if missing.Code != http.StatusNotFound || missing.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("missing asset status=%d type=%q", missing.Code, missing.Header().Get("Content-Type"))
+	}
+}
+
 func TestOpenAPIEndpoint(t *testing.T) {
 	handler := NewHandler(HandlerOptions{})
 	response := httptest.NewRecorder()

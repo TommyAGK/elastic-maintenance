@@ -23,6 +23,7 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
 	"github.com/TommyAGK/elastic-maintenance/internal/manifest"
 	"github.com/TommyAGK/elastic-maintenance/internal/validation"
+	webui "github.com/TommyAGK/elastic-maintenance/internal/web"
 )
 
 const (
@@ -194,6 +195,7 @@ func NewHandler(options HandlerOptions) http.Handler {
 	mux.HandleFunc("/auth/login", notImplementedAuth(http.MethodGet))
 	mux.HandleFunc("/auth/callback", notImplementedAuth(http.MethodGet))
 	mux.HandleFunc("/auth/logout", notImplementedAuth(http.MethodPost))
+	mux.HandleFunc("/assets/", serveWebAsset)
 
 	protectedMux := http.NewServeMux()
 	protectedMux.Handle("/api/v1/session", authorize(authorizer, auth.PermissionSessionRead, http.HandlerFunc(sessionHandler)))
@@ -225,6 +227,10 @@ func NewHandler(options HandlerOptions) http.Handler {
 	mux.Handle("/api/v1", protectedAPI)
 	mux.Handle("/api/v1/", protectedAPI)
 	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {
+		if webui.AppRoute(request.URL.Path) {
+			serveWebIndex(w, request)
+			return
+		}
 		api.WriteError(w, request, http.StatusNotFound, "not_found", "route not found", RequestID(request.Context()))
 	})
 
@@ -237,6 +243,33 @@ func NewHandler(options HandlerOptions) http.Handler {
 			),
 		),
 	)
+}
+
+func serveWebIndex(w http.ResponseWriter, request *http.Request) {
+	if !allowMethods(w, request, http.MethodGet, http.MethodHead) {
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if request.Method != http.MethodHead {
+		_, _ = w.Write(webui.Index())
+	}
+}
+
+func serveWebAsset(w http.ResponseWriter, request *http.Request) {
+	if !allowMethods(w, request, http.MethodGet, http.MethodHead) {
+		return
+	}
+	asset, ok := webui.Lookup(request.URL.Path)
+	if !ok {
+		api.WriteError(w, request, http.StatusNotFound, "not_found", "route not found", RequestID(request.Context()))
+		return
+	}
+	w.Header().Set("Content-Type", asset.ContentType)
+	w.WriteHeader(http.StatusOK)
+	if request.Method != http.MethodHead {
+		_, _ = w.Write(asset.Content)
+	}
 }
 
 func sessionHandler(w http.ResponseWriter, request *http.Request) {
@@ -425,7 +458,11 @@ func bodyLimitMiddleware(limit int64, next http.Handler) http.Handler {
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		next.ServeHTTP(w, request)
 	})
 }

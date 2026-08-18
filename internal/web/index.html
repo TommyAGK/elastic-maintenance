@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Read-only mounted desired-state inventory and validation for Elastic Maintainer">
+  <title>Elastic Maintainer</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="Elastic Maintainer home">
+      <span class="brand-mark" aria-hidden="true">EM</span>
+      <span><strong>Elastic Maintainer</strong><small>Desired state control room</small></span>
+    </a>
+    <div id="identity" class="identity" aria-live="polite"><span class="status-dot"></span>Checking session…</div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <nav>
+        <a href="#sources" data-view-link="sources"><span>01</span>Sources</a>
+        <a href="#targets" data-view-link="targets"><span>02</span>Targets</a>
+        <a href="#validations" data-view-link="validations"><span>03</span>Validations</a>
+      </nav>
+      <div class="authority-note">
+        <p class="eyebrow">Authority</p>
+        <strong>External GitOps owns desired state.</strong>
+        <p>Mounted configuration and resources are read-only here. Change them at their external source, then validate again.</p>
+      </div>
+      <a class="api-link" href="/api/v1/openapi.json">OpenAPI document <span aria-hidden="true">↗</span></a>
+    </aside>
+
+    <main id="main" tabindex="-1">
+      <section id="auth-state" class="notice hidden" aria-live="assertive">
+        <div><p class="eyebrow">Authentication required</p><h1>Sign in to inspect desired state</h1><p>The operator interface uses the same protected API as automation clients.</p></div>
+        <a class="button" href="/auth/login">Sign in with OIDC</a>
+      </section>
+      <section id="error-state" class="notice error hidden" role="alert"></section>
+
+      <div id="workspace" class="hidden">
+        <section class="view" data-view="sources" aria-labelledby="sources-title">
+          <div class="page-heading">
+            <div><p class="eyebrow">Mounted inputs</p><h1 id="sources-title">Source sets</h1><p>Canonical metadata from authoritative, read-only mounts.</p></div>
+            <button class="secondary" data-refresh="sources">Refresh</button>
+          </div>
+          <div id="source-metrics" class="metrics" aria-live="polite"></div>
+          <div class="panel table-panel"><div id="sources-table" class="table-wrap" aria-live="polite"></div><button id="sources-more" class="load-more hidden">Load more sources</button></div>
+          <div id="source-detail" class="detail panel hidden" aria-live="polite"></div>
+        </section>
+
+        <section class="view hidden" data-view="targets" aria-labelledby="targets-title">
+          <div class="page-heading">
+            <div><p class="eyebrow">Assignments</p><h1 id="targets-title">Kibana targets</h1><p>Every target is bound to exactly one mounted resource set.</p></div>
+            <button class="secondary" data-refresh="targets">Refresh</button>
+          </div>
+          <div id="target-metrics" class="metrics" aria-live="polite"></div>
+          <div class="panel table-panel"><div id="targets-table" class="table-wrap" aria-live="polite"></div><button id="targets-more" class="load-more hidden">Load more targets</button></div>
+          <div id="target-detail" class="detail panel hidden" aria-live="polite"></div>
+        </section>
+
+        <section class="view hidden" data-view="validations" aria-labelledby="validations-title">
+          <div class="page-heading">
+            <div><p class="eyebrow">Mounted-state checks</p><h1 id="validations-title">Validations</h1><p>Jobs re-read mounted inputs when execution begins and never contact Kibana.</p></div>
+            <button id="start-validation" class="button hidden">Validate all mounts</button>
+          </div>
+          <div id="validation-permission" class="notice compact hidden">Your role can inspect validation results but cannot start a validation.</div>
+          <div class="panel table-panel"><div id="validations-table" class="table-wrap" aria-live="polite"></div><button id="validations-more" class="load-more hidden">Load more validations</button></div>
+          <div id="validation-detail" class="detail panel hidden" aria-live="polite"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <noscript><p class="noscript">JavaScript is required because this interface consumes the Elastic Maintainer API directly.</p></noscript>
+</body>
+</html>

@@ -4,11 +4,12 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository has passed the **Phase 0: API-server migration skeleton** gate and is not production-ready. Phase 1 mounted-input and validation work is underway. Strict startup configuration, bounded descriptor-relative mounted-source discovery on Linux, typed `v1alpha1` decoding for all five resource kinds, deterministic target assignment/selector inventory, prerequisite-first per-target dependency DAGs, metadata-only source snapshots with versioned desired digests, bounded asynchronous validation execution, and authenticated source/target/validation APIs are implemented. Initial embedded web views remain incomplete. The active direction is defined by:
+The repository has passed the **Phase 1: mounted inputs, resource sets, and validation API** gate and is not production-ready. Strict startup configuration, bounded mounted-source discovery, typed `v1alpha1` manifests, deterministic assignments and dependency DAGs, canonical metadata-only snapshots and digests, bounded asynchronous validation, authenticated inventory/validation APIs, and initial embedded read-only operator views are implemented. Phase 2 OIDC, Kubernetes Secret management, and Kibana reads are next. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`
-- Current phase sub-plan: `docs/implementation/subplans/phase-1-mounted-inputs-resource-sets-and-validation-api.md`
+- Completed Phase 1 sub-plan: `docs/implementation/subplans/phase-1-mounted-inputs-resource-sets-and-validation-api.md`
+- Next phase sub-plan: `docs/implementation/subplans/phase-2-oidc-kubernetes-secrets-kibana-reads-and-inventory-api.md`
 - Kibana contract baseline: `docs/kibana-api-contracts.md`
 
 ## Target architecture
@@ -61,4 +62,4 @@ This creates the server directly at `bin/elastic-maintainer`. Start the current 
 bin/elastic-maintainer --config testdata/server-minimal.yaml
 ```
 
-The skeleton exposes `/health/live`, `/health/ready`, and `/api/v1/openapi.json`. The initial API contract covers session, mounted sources, targets, credential administration, validations, plans, jobs, reports, and audit. OIDC routes remain explicit placeholders. Protected routes deny access by default until production OIDC lands. Injected test authentication exercises session/RBAC behavior; authorized validation, plan, and apply requests enforce JSON and idempotency contracts but return explicit not-implemented job responses until durable execution is built. Prototype internal packages remain temporarily for test evidence but are not imported by the production server; their retirement owners are recorded in `docs/implementation/phase-0-retirement-inventory.md`. Supported Kubernetes workload manifests land in Phase 6.
+The server exposes the embedded operator shell at `/`, health endpoints, and `/api/v1/openapi.json`. Authenticated source, target, and validation operations are implemented; the UI consumes those endpoints directly and never offers mounted-resource editing. OIDC routes and later-phase plan/apply/credential operations remain explicit placeholders, and protected APIs deny access by default until production OIDC lands. Prototype internal packages remain temporarily for test evidence but are not imported by the production server; their retirement owners are recorded in `docs/implementation/phase-0-retirement-inventory.md`. Supported Kubernetes workload manifests land in Phase 6.
