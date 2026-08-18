@@ -4,11 +4,11 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository has passed the **Phase 0: API-server migration skeleton** gate and is not production-ready. Phase 1 mounted-input and validation work is underway. The superseded CLI has been replaced by a strict server entry point and HTTP routing skeleton with health, readiness, a versioned OpenAPI contract, request-safety middleware, deny-by-default authentication, centralized RBAC, and asynchronous validation/plan/apply job contracts. The active direction is defined by:
+The repository has passed the **Phase 0: API-server migration skeleton** gate and is not production-ready. Phase 1 mounted-input and validation work is underway. Strict startup configuration, bounded descriptor-relative mounted-source discovery on Linux, typed `v1alpha1` decoding for all five resource kinds, deterministic target assignment/selector inventory, and prerequisite-first per-target dependency DAGs are implemented. Canonical digests, jobs, and API integration remain incomplete. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`
-- Current phase sub-plan: `docs/implementation/subplans/phase-0-contract-fixtures-and-api-server-migration-skeleton.md`
+- Current phase sub-plan: `docs/implementation/subplans/phase-1-mounted-inputs-resource-sets-and-validation-api.md`
 - Kibana contract baseline: `docs/kibana-api-contracts.md`
 
 ## Target architecture

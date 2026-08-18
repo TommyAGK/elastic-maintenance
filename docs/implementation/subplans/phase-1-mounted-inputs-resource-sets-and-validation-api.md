@@ -11,7 +11,7 @@ Implement authoritative read-only mounted configuration/resource sets and expose
 
 ## Current status
 
-Substeps 1.1 and 1.2 are implemented. Strict configuration decoding rejects unknown, duplicate, multi-document, and credential-bearing configuration; startup validation bounds canonical identifiers and labels, enforces mount/Secret policy and HTTPS-or-loopback URL rules, and derives immutable normalized target identities. Resource-set discovery resolves configured roots within mounted boundaries, reads `.yaml`/`.yml` files in lexical order under explicit limits, rejects symlinks/special files/escapes, returns safe relative locations, and validates bounded single-line revision metadata. Strict resource-envelope decoding begins in substep 1.3.
+Substeps 1.1 through 1.5 are implemented. Strict configuration decoding rejects unknown, duplicate, multi-document, and credential-bearing configuration; startup validation bounds canonical identifiers and labels, enforces mount/Secret policy and HTTPS-or-loopback URL rules, and derives immutable normalized target identities. Resource-set discovery resolves configured roots within mounted boundaries, reads `.yaml`/`.yml` files in lexical order under explicit limits, rejects symlinks/special files/escapes, returns safe relative locations, and validates bounded single-line revision metadata. Resource decoding supports the five narrow `v1alpha1` kind schemas, multi-document YAML, exact versions, typed references, unique identities, sanitized source diagnostics, and deliberate rejection of YAML indirection, credentials, unsupported fields, rule variants, and duplicate prebuilt declarations. Assignment now produces bounded deterministic credential-safe inventories, evaluates exact selectors only against targets assigned to the same resource set, preserves normalized target identity and revision provenance, and rejects defensive structural or applicability inconsistencies. Reference resolution validates explicit and automatic package-policy dependencies across the complete resource set, rejects dangling, self, duplicate, cross-selector, and cyclic edges, and produces bounded deterministic prerequisite-first DAGs for every target. Canonical source snapshots and digests begin in substep 1.6.
 
 ## Substeps
 
@@ -42,6 +42,8 @@ Substeps 1.1 and 1.2 are implemented. Strict configuration decoding rejects unkn
 5. Reject credential fields, unsupported rule variants, `latest`/ranges, and multiple applicable prebuilt resources.
 6. Preserve source locations through typed decoding.
 
+Implementation note: Phase 1.3 enforces at most one `PrebuiltRules` declaration per resource set. Phase 1.4 also retains a defensive target-level applicability check after selector evaluation.
+
 ### 1.4 Resolve assignments and selectors
 
 1. Assign each target to exactly one resource set.
@@ -58,6 +60,8 @@ Substeps 1.1 and 1.2 are implemented. Strict configuration decoding rejects unkn
 3. Resolve explicit dependencies.
 4. Reject dangling, self, duplicate, cross-selector, and cyclic references.
 5. Produce stable per-target DAGs for planning.
+
+Implementation note: edge records use dependent-to-prerequisite direction, while target DAG nodes are emitted in prerequisite-first execution order. Dormant resources are excluded from target DAGs but their references and cycles are still validated so label changes cannot activate an invalid graph.
 
 ### 1.6 Canonicalize and snapshot sources
 

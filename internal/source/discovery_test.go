@@ -50,6 +50,9 @@ func TestDiscoverReadsYAMLInLexicalOrderWithSafeLocations(t *testing.T) {
 	if strings.Contains(string(encoded), mountRoot) || strings.Contains(string(encoded), "kind: a") {
 		t.Fatalf("serialized discovery result leaked an absolute path or source body: %s", encoded)
 	}
+	if !strings.Contains(string(encoded), `"resourceSetID":"production"`) || !strings.Contains(string(encoded), `"relativePath":"a.yaml"`) || strings.Contains(string(encoded), `"ResourceSetID"`) {
+		t.Fatalf("serialized discovery locations do not use the stable JSON shape: %s", encoded)
+	}
 }
 
 func TestDiscoverResolvesAssignedRootOnceWithinMountBoundary(t *testing.T) {

@@ -44,11 +44,11 @@ func DefaultLimits() Limits {
 }
 
 type Location struct {
-	ResourceSetID string
-	RelativePath  string
-	Document      int
-	Line          int
-	Column        int
+	ResourceSetID string `json:"resourceSetID"`
+	RelativePath  string `json:"relativePath"`
+	Document      int    `json:"document,omitempty"`
+	Line          int    `json:"line,omitempty"`
+	Column        int    `json:"column,omitempty"`
 }
 
 type File struct {
