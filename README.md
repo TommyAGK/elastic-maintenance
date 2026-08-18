@@ -4,7 +4,7 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository has passed the **Phase 0: API-server migration skeleton** gate and is not production-ready. Phase 1 mounted-input and validation work is underway. Strict startup configuration, bounded descriptor-relative mounted-source discovery on Linux, typed `v1alpha1` decoding for all five resource kinds, deterministic target assignment/selector inventory, prerequisite-first per-target dependency DAGs, and metadata-only source snapshots with versioned desired digests are implemented. Validation jobs and API integration remain incomplete. The active direction is defined by:
+The repository has passed the **Phase 0: API-server migration skeleton** gate and is not production-ready. Phase 1 mounted-input and validation work is underway. Strict startup configuration, bounded descriptor-relative mounted-source discovery on Linux, typed `v1alpha1` decoding for all five resource kinds, deterministic target assignment/selector inventory, prerequisite-first per-target dependency DAGs, metadata-only source snapshots with versioned desired digests, and bounded asynchronous validation execution are implemented. Source/target API integration remains incomplete. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`

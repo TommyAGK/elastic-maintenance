@@ -162,6 +162,25 @@ func TestUnavailableQueueIsExplicit(t *testing.T) {
 	}
 }
 
+func TestCanTransition(t *testing.T) {
+	allowed := map[[2]Status]bool{
+		{StatusQueued, StatusRunning}:      true,
+		{StatusQueued, StatusCanceled}:     true,
+		{StatusRunning, StatusSucceeded}:   true,
+		{StatusRunning, StatusFailed}:      true,
+		{StatusRunning, StatusCanceled}:    true,
+		{StatusRunning, StatusInterrupted}: true,
+	}
+	statuses := []Status{StatusQueued, StatusRunning, StatusSucceeded, StatusFailed, StatusCanceled, StatusInterrupted}
+	for _, from := range statuses {
+		for _, to := range statuses {
+			if got := CanTransition(from, to); got != allowed[[2]Status{from, to}] {
+				t.Errorf("CanTransition(%q, %q) = %v", from, to, got)
+			}
+		}
+	}
+}
+
 func TestKnownTypesAndStatuses(t *testing.T) {
 	for _, jobType := range []Type{TypeValidation, TypePlan, TypeApply} {
 		if !jobType.Valid() {

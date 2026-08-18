@@ -15,6 +15,8 @@ var (
 	ErrConflict                = errors.New("job conflict")
 	ErrInvalidTransition       = errors.New("invalid job status transition")
 	ErrCancellationUnsupported = errors.New("job cancellation is not supported")
+	ErrQueueFull               = errors.New("job queue is full")
+	ErrQueueClosed             = errors.New("job queue is closed")
 
 	digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	jobIDPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -107,7 +109,7 @@ func (job Job) Validate() error {
 	if (job.Status == StatusFailed || job.Status == StatusInterrupted) && job.FailureCode == "" {
 		return errors.New("failed or interrupted job requires a failure code")
 	}
-	if (job.Status == StatusQueued || job.Status == StatusRunning || job.Status == StatusSucceeded) && job.FailureCode != "" {
+	if (job.Status == StatusQueued || job.Status == StatusRunning || job.Status == StatusSucceeded || job.Status == StatusCanceled) && job.FailureCode != "" {
 		return errors.New("non-failed job must not have a failure code")
 	}
 	return nil
@@ -119,6 +121,17 @@ func (jobType Type) Valid() bool {
 
 func (status Status) Valid() bool {
 	return status == StatusQueued || status == StatusRunning || status == StatusSucceeded || status == StatusFailed || status == StatusCanceled || status == StatusInterrupted
+}
+
+func CanTransition(from, to Status) bool {
+	switch from {
+	case StatusQueued:
+		return to == StatusRunning || to == StatusCanceled
+	case StatusRunning:
+		return to == StatusSucceeded || to == StatusFailed || to == StatusCanceled || to == StatusInterrupted
+	default:
+		return false
+	}
 }
 
 type NewJobInput struct {

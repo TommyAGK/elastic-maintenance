@@ -1,6 +1,7 @@
 package source
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -177,6 +178,13 @@ func (limits Limits) Validate() error {
 }
 
 func (discoverer *Discoverer) Discover(resourceSetID, root, revisionFile string) (*ResourceSet, error) {
+	return discoverer.DiscoverContext(context.Background(), resourceSetID, root, revisionFile)
+}
+
+func (discoverer *Discoverer) DiscoverContext(ctx context.Context, resourceSetID, root, revisionFile string) (*ResourceSet, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if discoverer == nil {
 		return nil, errors.New("source discoverer is nil")
 	}
@@ -200,7 +208,7 @@ func (discoverer *Discoverer) Discover(resourceSetID, root, revisionFile string)
 		return nil, discoveryError("root_escape", resourceSetID, "", nil)
 	}
 
-	result, err := discoverResourceSetContents(resourceSetID, mountRoot, resolvedRoot, revisionFile, discoverer.limits)
+	result, err := discoverResourceSetContents(ctx, resourceSetID, mountRoot, resolvedRoot, revisionFile, discoverer.limits)
 	if err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@
 package source
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -10,12 +11,15 @@ import (
 	"strings"
 )
 
-func discoverResourceSetContents(resourceSetID, _ string, resolvedRoot, revisionFile string, limits Limits) (*ResourceSet, error) {
+func discoverResourceSetContents(ctx context.Context, resourceSetID, _ string, resolvedRoot, revisionFile string, limits Limits) (*ResourceSet, error) {
 	result := &ResourceSet{ID: resourceSetID}
 	var entries int
 	var totalBytes int64
 	revisionFound := false
 	err := filepath.WalkDir(resolvedRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		relative := relativeDisplayPath(resolvedRoot, path)
 		if walkErr != nil {
 			return discoveryError("unreadable_path", resourceSetID, relative, sanitizePathError(walkErr))

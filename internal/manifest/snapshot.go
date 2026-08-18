@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -53,6 +54,13 @@ type SourceSnapshot struct {
 // mounted resources. The returned snapshot contains metadata and digests only;
 // it never retains source bodies or credential Secret references.
 func BuildSourceSnapshot(cfg *config.ServerConfig, discovered []source.ResourceSet) (*SourceSnapshot, error) {
+	return BuildSourceSnapshotContext(context.Background(), cfg, discovered)
+}
+
+func BuildSourceSnapshotContext(ctx context.Context, cfg *config.ServerConfig, discovered []source.ResourceSet) (*SourceSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if cfg == nil {
 		return nil, errors.New("build source snapshot: server config is nil")
 	}
@@ -61,6 +69,9 @@ func BuildSourceSnapshot(cfg *config.ServerConfig, discovered []source.ResourceS
 	}
 	discoveredByID := make(map[string]source.ResourceSet, len(discovered))
 	for _, set := range discovered {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if set.ID == "" {
 			return nil, errors.New("build source snapshot: discovered resource set id is empty")
 		}
@@ -88,6 +99,9 @@ func BuildSourceSnapshot(cfg *config.ServerConfig, discovered []source.ResourceS
 		seenFiles := make(map[string]struct{}, len(set.Files))
 		var totalBytes int64
 		for _, file := range set.Files {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if file.Location.ResourceSetID != set.ID || !safeSnapshotPath(file.Location.RelativePath) {
 				return nil, errors.New("build source snapshot: source file provenance is invalid")
 			}
@@ -118,6 +132,9 @@ func BuildSourceSnapshot(cfg *config.ServerConfig, discovered []source.ResourceS
 	setIDs := sortedResourceSetConfigIDs(cfg.ResourceSets)
 	decoded := make([]*ResourceSet, 0, len(setIDs))
 	for _, setID := range setIDs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		set := discoveredByID[setID]
 		resources, err := DecodeResourceSet(set)
 		if err != nil {
@@ -137,8 +154,14 @@ func BuildSourceSnapshot(cfg *config.ServerConfig, discovered []source.ResourceS
 		}
 		decoded = append(decoded, resources)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	inventory, err := BuildInventory(cfg, decoded)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if _, err := ResolveTargetDAGs(decoded, inventory); err != nil {
@@ -154,6 +177,9 @@ func BuildSourceSnapshot(cfg *config.ServerConfig, discovered []source.ResourceS
 		ResourceSets: make([]ResourceSetSnapshot, 0, len(decoded)), Targets: make([]TargetSnapshot, 0, len(inventory.Targets)),
 	}
 	for _, setID := range setIDs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		set := decodedByID[setID]
 		canonical, err := canonicalizeResourceSet(set)
 		if err != nil {
@@ -189,6 +215,9 @@ func BuildSourceSnapshot(cfg *config.ServerConfig, discovered []source.ResourceS
 		result.ResourceSets = append(result.ResourceSets, snapshot)
 	}
 	for _, target := range inventory.Targets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		set := decodedByID[target.ResourceSetID]
 		canonical, err := canonicalizeTarget(cfg, target, set)
 		if err != nil {

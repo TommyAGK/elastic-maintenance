@@ -3,6 +3,7 @@
 package source
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 )
 
 type linuxWalkState struct {
+	ctx           context.Context
 	resourceSetID string
 	revisionFile  string
 	limits        Limits
@@ -23,7 +25,7 @@ type linuxWalkState struct {
 	revisionFound bool
 }
 
-func discoverResourceSetContents(resourceSetID, mountRoot, resolvedRoot, revisionFile string, limits Limits) (*ResourceSet, error) {
+func discoverResourceSetContents(ctx context.Context, resourceSetID, mountRoot, resolvedRoot, revisionFile string, limits Limits) (*ResourceSet, error) {
 	mount, err := openAbsoluteDirectoryNoFollow(mountRoot)
 	if err != nil {
 		return nil, discoveryError("root_unavailable", resourceSetID, "", err)
@@ -40,6 +42,7 @@ func discoverResourceSetContents(resourceSetID, mountRoot, resolvedRoot, revisio
 	defer root.Close()
 
 	state := &linuxWalkState{
+		ctx:           ctx,
 		resourceSetID: resourceSetID,
 		revisionFile:  filepath.ToSlash(revisionFile),
 		limits:        limits,
@@ -129,6 +132,9 @@ func openDirectoryAt(parent *os.File, name string) (*os.File, error) {
 }
 
 func (state *linuxWalkState) walkDirectory(directory *os.File, parent string, depth int) error {
+	if err := state.ctx.Err(); err != nil {
+		return err
+	}
 	remaining := state.limits.MaxEntries - state.entries
 	entries := make([]os.DirEntry, 0, min(remaining, 256))
 	for {
@@ -156,6 +162,9 @@ func (state *linuxWalkState) walkDirectory(directory *os.File, parent string, de
 	sort.Slice(entries, func(left, right int) bool { return entries[left].Name() < entries[right].Name() })
 
 	for _, entry := range entries {
+		if err := state.ctx.Err(); err != nil {
+			return err
+		}
 		relative := entry.Name()
 		if parent != "" {
 			relative = parent + "/" + entry.Name()
@@ -218,6 +227,9 @@ func sameFileIdentity(left, right unix.Stat_t) bool {
 }
 
 func (state *linuxWalkState) readRegularFile(directory *os.File, name, relative string, isRevision bool, expected unix.Stat_t) error {
+	if err := state.ctx.Err(); err != nil {
+		return err
+	}
 	isResource := filepath.Ext(name) == ".yaml" || filepath.Ext(name) == ".yml"
 	if !isRevision && !isResource {
 		return nil
