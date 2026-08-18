@@ -1,6 +1,8 @@
 package source
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -56,10 +58,31 @@ type File struct {
 	Contents []byte `json:"-"`
 }
 
+type RawFileDigest struct {
+	RelativePath string `json:"relativePath"`
+	SHA256       string `json:"sha256"`
+	Bytes        int64  `json:"bytes"`
+}
+
+func (file File) RawDigest() RawFileDigest {
+	digest := sha256.Sum256(file.Contents)
+	return RawFileDigest{RelativePath: file.Location.RelativePath, SHA256: hex.EncodeToString(digest[:]), Bytes: int64(len(file.Contents))}
+}
+
 type ResourceSet struct {
 	ID       string
 	Revision string
 	Files    []File
+}
+
+func (set ResourceSet) RawFileDigests() []RawFileDigest {
+	files := append([]File(nil), set.Files...)
+	sort.SliceStable(files, func(i, j int) bool { return files[i].Location.RelativePath < files[j].Location.RelativePath })
+	result := make([]RawFileDigest, 0, len(files))
+	for _, file := range files {
+		result = append(result, file.RawDigest())
+	}
+	return result
 }
 
 type DiscoveryError struct {
@@ -227,6 +250,17 @@ func readBoundedOpenFile(file *os.File, before fs.FileInfo, limit int64) ([]byte
 		return nil, errors.New("file changed during discovery")
 	}
 	return contents, nil
+}
+
+func ValidateRevisionMetadata(value string) error {
+	validated, err := validateRevision([]byte(value))
+	if err != nil {
+		return err
+	}
+	if validated != value {
+		return errors.New("revision metadata must not contain surrounding whitespace")
+	}
+	return nil
 }
 
 func validateRevision(contents []byte) (string, error) {

@@ -1,6 +1,8 @@
 package source
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -40,6 +42,17 @@ func TestDiscoverReadsYAMLInLexicalOrderWithSafeLocations(t *testing.T) {
 		}
 		if string(file.Contents) != wantContents[index] {
 			t.Errorf("Files[%d].Contents = %q", index, file.Contents)
+		}
+	}
+
+	rawDigests := result.RawFileDigests()
+	if len(rawDigests) != len(wantPaths) {
+		t.Fatalf("RawFileDigests() = %#v", rawDigests)
+	}
+	for index, raw := range rawDigests {
+		expected := sha256.Sum256([]byte(wantContents[index]))
+		if raw.RelativePath != wantPaths[index] || raw.SHA256 != hex.EncodeToString(expected[:]) || raw.Bytes != int64(len(wantContents[index])) {
+			t.Fatalf("RawFileDigests()[%d] = %#v", index, raw)
 		}
 	}
 

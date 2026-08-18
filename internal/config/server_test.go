@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
@@ -247,6 +248,38 @@ func TestTargetIdentityNormalizesURLAndDefaultSpaceWithoutMutation(t *testing.T)
 	}
 	if cfg.Targets["production-default"].URL != target.URL || cfg.Targets["production-default"].Space != "" {
 		t.Fatal("TargetIdentity mutated mounted target configuration")
+	}
+}
+
+func TestNormalizeTargetConfigExcludesCredentialsAndCopiesLabels(t *testing.T) {
+	cfg, err := LoadServerConfig("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cfg.Targets["production-default"]
+	target.URL = "HTTPS://KIBANA.Example.Test:443/"
+	target.Space = ""
+	target.Labels = map[string]string{"environment": "production"}
+	target.CredentialSecret = SecretReference{Namespace: "credential-sentinel", Name: "credential-sentinel"}
+	cfg.Targets["production-default"] = target
+
+	normalized, err := cfg.NormalizeTargetConfig("production-default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.URL != "https://kibana.example.test" || normalized.Space != "default" || normalized.ResourceSetID != target.ResourceSet {
+		t.Fatalf("NormalizeTargetConfig() = %#v", normalized)
+	}
+	normalized.Labels["environment"] = "changed"
+	if cfg.Targets["production-default"].Labels["environment"] != "production" {
+		t.Fatal("NormalizeTargetConfig() returned an aliased labels map")
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "credential-sentinel") || strings.Contains(string(encoded), "credentialSecret") {
+		t.Fatalf("normalized target leaked credential reference: %s", encoded)
 	}
 }
 

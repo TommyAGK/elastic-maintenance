@@ -103,6 +103,15 @@ type TargetIdentity struct {
 	Space   string
 }
 
+type NormalizedTargetConfig struct {
+	StateID       string            `json:"stateID"`
+	Name          string            `json:"name"`
+	URL           string            `json:"url"`
+	Space         string            `json:"space"`
+	ResourceSetID string            `json:"resourceSetID"`
+	Labels        map[string]string `json:"labels"`
+}
+
 type SecretReference struct {
 	Namespace string `yaml:"namespace"`
 	Name      string `yaml:"name"`
@@ -255,6 +264,22 @@ func (cfg *ServerConfig) TargetIdentity(name string) (TargetIdentity, error) {
 		return TargetIdentity{}, fmt.Errorf("target %q identity is invalid", name)
 	}
 	return TargetIdentity{StateID: cfg.StateID, Name: name, URL: normalizedURL, Space: space}, nil
+}
+
+func (cfg *ServerConfig) NormalizeTargetConfig(name string) (NormalizedTargetConfig, error) {
+	identity, err := cfg.TargetIdentity(name)
+	if err != nil {
+		return NormalizedTargetConfig{}, err
+	}
+	target := cfg.Targets[name]
+	labels := make(map[string]string, len(target.Labels))
+	for key, value := range target.Labels {
+		labels[key] = value
+	}
+	return NormalizedTargetConfig{
+		StateID: identity.StateID, Name: identity.Name, URL: identity.URL, Space: identity.Space,
+		ResourceSetID: target.ResourceSet, Labels: labels,
+	}, nil
 }
 
 func (cfg *ServerConfig) ValidateStartup() error {

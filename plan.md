@@ -195,6 +195,8 @@ Stable remote mapping:
 | `DetectionRule` | `metadata.id`, sent as `rule_id` |
 | `PrebuiltRules` | `metadata.id`; at most one applies to a target |
 
+Source snapshots are metadata-only. Versioned RFC 8785/SHA-256 desired digests cover canonical typed resources; target digests additionally cover only normalized assigned target configuration and applicable resources. Credential Secret references, unrelated targets/resource sets, source paths, raw formatting hashes, and external revision text are excluded. Raw file hashes and revision values remain provenance for diagnostics, so formatting-only or revision-only changes do not alter desired digests. Any canonical projection change requires a new digest version, and snapshots never become a writable replacement for mounted authority.
+
 ## 7. Authentication, sessions, and authorization
 
 ### OIDC
