@@ -17,7 +17,7 @@ The repository has passed the **Phase 1: mounted inputs, resource sets, and vali
 - Long-running, single-replica Go API service deployed to Kubernetes.
 - Embedded web UI as the primary operator experience.
 - Versioned `/api/v1` REST API and OpenAPI contract for external automation.
-- Application-level OIDC authentication with viewer, planner, applier, and administrator roles.
+- Application-level OIDC authentication with viewer, planner, applier, and administrator roles, plus one vault-controlled local break-glass administrator for complete IdP outages.
 - Mounted Git/YAML resource sets remain authoritative and read-only.
 - Each Kibana target is assigned to one mounted resource set, allowing external orchestration to mount separate branches or revisions.
 - Administrators upload Kibana API keys and CA trust bundles through the protected UI/API; the service stores them in owned Kubernetes Secrets.

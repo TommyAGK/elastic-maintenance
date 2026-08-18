@@ -25,6 +25,7 @@ Use application-level OIDC:
 - Authorization Code with PKCE and protected cookies for browser users.
 - Bearer-token validation for automation.
 - Viewer, planner, applier, and administrator roles.
+- One explicitly configured local break-glass administrator for complete IdP outages. Its canonical non-secret username is mounted in application configuration, its pinned Argon2id verifier and opaque generation are mounted from a Kubernetes Secret, and the sole recoverable high-entropy username/password pair remains in an external audited password vault. Its browser session is explicitly marked `break-glass`, expires absolutely after 15 minutes without renewal, rechecks an internal revision of the live username/verifier/generation/enabled state on every use, requires no MFA, has no bearer-token equivalent, is rate-limited and audited, and is never selected as an automatic fallback. A tested runbook provisions it offline and rotates the vault credential and verifier generation after every use.
 - An actor with apply permission may apply their own plan.
 - Security and operational actions produce non-secret audit events.
 
@@ -49,7 +50,7 @@ Plans are internal server-managed artifacts and cannot be uploaded or edited thr
 ### Positive
 
 - Operators receive a web-first workflow and automation API.
-- OIDC/RBAC/audit provide an explicit authorization boundary.
+- OIDC/RBAC/audit provide the primary authorization boundary, with a narrowly bounded and independently operable emergency recovery path.
 - Git branch/revision orchestration remains outside the service and can evolve independently.
 - Kubernetes Secrets keep Kibana credentials out of PVC application state.
 - One reconciliation and safety implementation serves browser and API clients.
@@ -57,7 +58,7 @@ Plans are internal server-managed artifacts and cannot be uploaded or edited thr
 ### Negative and constraints
 
 - The service becomes a persistent, externally exposed security boundary.
-- OIDC, ingress/proxy trust, CSRF/CORS, rate limiting, and API compatibility require first-class testing.
+- OIDC, break-glass credential/session controls, ingress/proxy trust, CSRF/CORS, rate limiting, and API compatibility require first-class testing.
 - Creating Kubernetes Secrets requires namespaced ServiceAccount permissions that Kubernetes RBAC cannot restrict by creation-name prefix; a dedicated namespace plus application ownership checks is required.
 - JSON/PVC persistence prevents safe multi-replica operation.
 - Credential upload requests contain sensitive values in server memory and must be excluded from logging, tracing, caching, and state.

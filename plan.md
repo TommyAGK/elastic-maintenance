@@ -206,6 +206,7 @@ Source snapshots are metadata-only. Versioned RFC 8785/SHA-256 desired digests c
 - Use secure, HttpOnly, SameSite cookies protected by a Kubernetes Secret-backed session key.
 - Do not store access/ID tokens in browser local/session storage.
 - Validate external automation bearer tokens against the same configured issuer and audience.
+- Provide one explicitly configured local break-glass administrator that remains usable during a complete IdP outage. Store the canonical non-secret username in mounted configuration and only a pinned Argon2id verifier plus opaque generation in a mounted Kubernetes Secret; keep the sole recoverable high-entropy username/password pair in an external audited password vault. Its browser session is marked `break-glass`, expires absolutely after 15 minutes without renewal, rechecks an internal revision of the live username/verifier/generation/enabled state on every use, has no MFA requirement or bearer-token form, is rate-limited and audited, and is never an automatic fallback. A tested runbook provisions the verifier offline and rotates both vault credential and verifier generation after every use.
 - Disable arbitrary CORS by default; use a strict configured origin allowlist only when external browser origins are required.
 
 ### Roles
@@ -501,9 +502,9 @@ Gate: invalid mounted inputs fail with actionable diagnostics; valid assigned re
 
 Detailed sub-plan: `docs/implementation/subplans/phase-2-oidc-kubernetes-secrets-kibana-reads-and-inventory-api.md`
 
-- Complete OIDC/RBAC, credential upload/rotation to owned Secrets, Kibana TLS/version/pagination/read adapters, and target/resource inventory APIs.
+- Complete OIDC/RBAC, independently operable audited break-glass administrator access, credential upload/rotation to owned Secrets, Kibana TLS/version/pagination/read adapters, and target/resource inventory APIs.
 
-Gate: authenticated roles and Secret ownership controls pass; every kind reads through public APIs in both spaces/versions without secret leakage.
+Gate: authenticated roles and Secret ownership controls pass; break-glass administrator access works without the IdP, expires absolutely, rechecks and invalidates on every effective credential-set change, and has a tested post-use vault/verifier rotation runbook; every kind reads through public APIs in both spaces/versions without secret leakage.
 
 ### Phase 3 — PVC state, diff, plans, and planning API
 
