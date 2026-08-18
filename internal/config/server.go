@@ -54,6 +54,8 @@ type ServerConfig struct {
 	SecretPolicy       KubernetesSecretPolicy       `yaml:"secretPolicy"`
 	ResourceSets       map[string]ResourceSetConfig `yaml:"resourceSets,omitempty"`
 	Targets            map[string]TargetConfig      `yaml:"targets,omitempty"`
+	configPath         string
+	startupOverrides   StartupOptions
 }
 
 type OIDCConfig struct {
@@ -211,6 +213,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 		}
 		return nil, fmt.Errorf("decode server config: %w", sanitizeYAMLDecodeError(err))
 	}
+	cfg.configPath = path
 	return cfg, nil
 }
 
@@ -239,6 +242,21 @@ func (cfg *ServerConfig) ApplyStartupOverrides(options StartupOptions) {
 	if options.PublicURLOverride != "" {
 		cfg.PublicURL = options.PublicURLOverride
 	}
+	cfg.startupOverrides = options
+}
+
+func (cfg *ServerConfig) RuntimeConfigPath() string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.configPath
+}
+
+func (cfg *ServerConfig) StartupOverrides() StartupOptions {
+	if cfg == nil {
+		return StartupOptions{}
+	}
+	return cfg.startupOverrides
 }
 
 func (cfg *ServerConfig) TargetIdentity(name string) (TargetIdentity, error) {

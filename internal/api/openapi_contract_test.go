@@ -92,17 +92,25 @@ func TestOpenAPICoversInitialWebFirstSurface(t *testing.T) {
 func TestOpenAPIUnfinishedRoutesAreExplicit(t *testing.T) {
 	document := openAPITestDocument(t)
 	paths := objectAt(t, document, "paths")
+	implemented := map[string]bool{
+		"GET /health/live": true, "GET /health/ready": true, "GET /api/v1/openapi.json": true, "GET /api/v1/session": true,
+		"GET /api/v1/sources": true, "GET /api/v1/sources/{sourceId}": true,
+		"GET /api/v1/targets": true, "GET /api/v1/targets/{targetId}": true,
+		"GET /api/v1/validations": true, "POST /api/v1/validations": true, "GET /api/v1/validations/{jobId}": true,
+	}
 	for path, rawPathItem := range paths {
-		if path == "/health/live" || path == "/health/ready" || path == "/api/v1/openapi.json" || path == "/api/v1/session" {
-			continue
-		}
 		for method, rawOperation := range rawPathItem.(map[string]any) {
 			if !isHTTPMethod(method) {
 				continue
 			}
+			operation := strings.ToUpper(method) + " " + path
 			responses := rawOperation.(map[string]any)["responses"].(map[string]any)
-			if _, ok := responses["501"]; !ok {
-				t.Errorf("unfinished operation %s %s does not document 501", strings.ToUpper(method), path)
+			_, hasNotImplemented := responses["501"]
+			if implemented[operation] && hasNotImplemented {
+				t.Errorf("implemented operation %s still documents 501", operation)
+			}
+			if !implemented[operation] && !hasNotImplemented {
+				t.Errorf("unfinished operation %s does not document 501", operation)
 			}
 		}
 	}

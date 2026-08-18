@@ -20,6 +20,7 @@ type InputReader interface {
 
 type MountedInputReader struct {
 	ConfigPath string
+	Overrides  config.StartupOptions
 	Limits     source.Limits
 }
 
@@ -31,6 +32,7 @@ func (reader MountedInputReader) Read(ctx context.Context) (InputSnapshot, error
 	if err != nil {
 		return InputSnapshot{}, errors.New("load mounted server configuration")
 	}
+	cfg.ApplyStartupOverrides(reader.Overrides)
 	if err := cfg.ValidateStartup(); err != nil {
 		return InputSnapshot{}, errors.New("validate mounted server configuration")
 	}

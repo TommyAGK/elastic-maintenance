@@ -18,6 +18,9 @@ func TestLoadAndValidateServerConfig(t *testing.T) {
 	if err := cfg.ValidateStartup(); err != nil {
 		t.Fatalf("ValidateStartup() error = %v", err)
 	}
+	if cfg.RuntimeConfigPath() != "testdata/server-valid.yaml" {
+		t.Fatalf("RuntimeConfigPath() = %q", cfg.RuntimeConfigPath())
+	}
 	if cfg.Listen != ":8080" {
 		t.Fatalf("Listen = %q", cfg.Listen)
 	}
@@ -225,6 +228,9 @@ func TestApplyStartupOverrides(t *testing.T) {
 	})
 	if cfg.Listen != "127.0.0.1:9000" || cfg.StateDir != "/override/state" || cfg.PublicURL != "http://localhost:9000" {
 		t.Fatalf("config = %#v", cfg)
+	}
+	if got := cfg.StartupOverrides(); got.ListenOverride != "127.0.0.1:9000" || got.StateDirOverride != "/override/state" || got.PublicURLOverride != "http://localhost:9000" {
+		t.Fatalf("StartupOverrides() = %#v", got)
 	}
 }
 

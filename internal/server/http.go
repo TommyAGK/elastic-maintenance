@@ -20,31 +20,44 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/api"
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
+	"github.com/TommyAGK/elastic-maintenance/internal/manifest"
+	"github.com/TommyAGK/elastic-maintenance/internal/validation"
 )
 
 const (
-	maxRequestBodyBytes = 1 << 20
-	maxHeaderBytes      = 32 << 10
-	readHeaderTimeout   = 5 * time.Second
-	readTimeout         = 15 * time.Second
-	writeTimeout        = 30 * time.Second
-	idleTimeout         = 60 * time.Second
+	maxRequestBodyBytes       = 1 << 20
+	maxHeaderBytes            = 32 << 10
+	readHeaderTimeout         = 5 * time.Second
+	readTimeout               = 15 * time.Second
+	writeTimeout              = 30 * time.Second
+	idleTimeout               = 60 * time.Second
+	validationShutdownTimeout = 10 * time.Second
 )
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+type ValidationBackend interface {
+	Start(context.Context, validation.StartRequest) (jobs.Job, error)
+	Get(context.Context, string) (validation.Record, error)
+	List(context.Context, jobs.ListOptions) (validation.RecordPage, error)
+	CurrentSnapshot(context.Context) (*manifest.SourceSnapshot, error)
+}
+
 type HandlerOptions struct {
-	Logger        *slog.Logger
-	IsReady       func() bool
-	Authenticator auth.Authenticator
-	Authorizer    auth.Authorizer
+	Logger            *slog.Logger
+	IsReady           func() bool
+	Authenticator     auth.Authenticator
+	Authorizer        auth.Authorizer
+	ValidationBackend ValidationBackend
 }
 
 type HTTPRuntime struct {
-	listener net.Listener
-	server   *http.Server
-	build    BuildInfo
-	ready    atomic.Bool
+	listener   net.Listener
+	server     *http.Server
+	validation *validation.Service
+	build      BuildInfo
+	ready      atomic.Bool
 }
 
 func NewHTTPRuntime(cfg *config.ServerConfig, build BuildInfo) (Runtime, error) {
@@ -76,10 +89,17 @@ func newHTTPRuntime(
 		return nil, fmt.Errorf("listen on configured address: %w", err)
 	}
 
-	runtime := &HTTPRuntime{listener: listener, build: build.Normalized()}
+	validationService, err := validation.NewService(validation.Options{
+		Inputs:     validation.MountedInputReader{ConfigPath: cfg.RuntimeConfigPath(), Overrides: cfg.StartupOverrides()},
+		Repository: validation.NewMemoryRepository(), Workers: 1, QueueCapacity: 32,
+	})
+	if err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("create validation service: %w", err)
+	}
+	runtime := &HTTPRuntime{listener: listener, validation: validationService, build: build.Normalized()}
 	handler := NewHandler(HandlerOptions{
-		Logger:  logger,
-		IsReady: runtime.ready.Load,
+		Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService,
 	})
 	runtime.server = &http.Server{
 		Handler:           handler,
@@ -100,12 +120,27 @@ func (runtime *HTTPRuntime) Serve() error {
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
+	if err != nil {
+		_ = runtime.listener.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), validationShutdownTimeout)
+		defer cancel()
+		_ = runtime.validation.Shutdown(ctx)
+	}
 	return err
 }
 
 func (runtime *HTTPRuntime) Shutdown(ctx context.Context) error {
 	runtime.ready.Store(false)
-	return runtime.server.Shutdown(ctx)
+	serverErr := runtime.server.Shutdown(ctx)
+	listenerErr := runtime.listener.Close()
+	validationErr := runtime.validation.Shutdown(ctx)
+	if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+		return serverErr
+	}
+	if listenerErr != nil && !errors.Is(listenerErr, net.ErrClosed) {
+		return listenerErr
+	}
+	return validationErr
 }
 
 func NewHandler(options HandlerOptions) http.Handler {
@@ -124,6 +159,9 @@ func NewHandler(options HandlerOptions) http.Handler {
 	authorizer := options.Authorizer
 	if authorizer == nil {
 		authorizer = auth.RBACAuthorizer{}
+	}
+	if options.ValidationBackend == nil {
+		options.ValidationBackend = unavailableValidationBackend{}
 	}
 
 	mux := http.NewServeMux()
@@ -159,12 +197,21 @@ func NewHandler(options HandlerOptions) http.Handler {
 
 	protectedMux := http.NewServeMux()
 	protectedMux.Handle("/api/v1/session", authorize(authorizer, auth.PermissionSessionRead, http.HandlerFunc(sessionHandler)))
-	protectedMux.Handle("/api/v1/sources", authorize(authorizer, auth.PermissionSourcesRead, readPlaceholder("source inventory")))
-	protectedMux.Handle("/api/v1/sources/", detailReadHandler("/api/v1/sources/", authorizer, auth.PermissionSourcesRead, "source inventory"))
-	protectedMux.Handle("/api/v1/targets", authorize(authorizer, auth.PermissionTargetsRead, readPlaceholder("target inventory")))
-	protectedMux.Handle("/api/v1/targets/", targetSubresourceHandler(authorizer))
-	protectedMux.Handle("/api/v1/validations", jobCollectionHandler(authorizer, auth.PermissionValidationsRead, auth.PermissionValidationsCreate, "validation"))
-	protectedMux.Handle("/api/v1/validations/", detailReadHandler("/api/v1/validations/", authorizer, auth.PermissionValidationsRead, "validation job"))
+	if options.ValidationBackend == nil {
+		protectedMux.Handle("/api/v1/sources", authorize(authorizer, auth.PermissionSourcesRead, readPlaceholder("source inventory")))
+		protectedMux.Handle("/api/v1/sources/", detailReadHandler("/api/v1/sources/", authorizer, auth.PermissionSourcesRead, "source inventory"))
+		protectedMux.Handle("/api/v1/targets", authorize(authorizer, auth.PermissionTargetsRead, readPlaceholder("target inventory")))
+		protectedMux.Handle("/api/v1/targets/", targetSubresourceHandler(authorizer))
+		protectedMux.Handle("/api/v1/validations", jobCollectionHandler(authorizer, auth.PermissionValidationsRead, auth.PermissionValidationsCreate, "validation"))
+		protectedMux.Handle("/api/v1/validations/", detailReadHandler("/api/v1/validations/", authorizer, auth.PermissionValidationsRead, "validation job"))
+	} else {
+		protectedMux.Handle("/api/v1/sources", authorize(authorizer, auth.PermissionSourcesRead, sourceCollectionHandler(options.ValidationBackend)))
+		protectedMux.Handle("/api/v1/sources/", authorize(authorizer, auth.PermissionSourcesRead, sourceDetailHandler(options.ValidationBackend)))
+		protectedMux.Handle("/api/v1/targets", authorize(authorizer, auth.PermissionTargetsRead, targetCollectionHandler(options.ValidationBackend)))
+		protectedMux.Handle("/api/v1/targets/", targetPhaseOneHandler(options.ValidationBackend, authorizer))
+		protectedMux.Handle("/api/v1/validations", validationCollectionHandler(options.ValidationBackend, authorizer))
+		protectedMux.Handle("/api/v1/validations/", authorize(authorizer, auth.PermissionValidationsRead, validationDetailHandler(options.ValidationBackend)))
+	}
 	protectedMux.Handle("/api/v1/plans", jobCollectionHandler(authorizer, auth.PermissionPlansRead, auth.PermissionPlansCreate, "plan"))
 	protectedMux.Handle("/api/v1/plans/", planSubresourceHandler(authorizer))
 	protectedMux.Handle("/api/v1/jobs", authorize(authorizer, auth.PermissionJobsRead, readPlaceholder("job inventory")))

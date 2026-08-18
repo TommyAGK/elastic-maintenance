@@ -37,7 +37,11 @@ func IdempotencyKey(request *http.Request) (string, error) {
 	if request == nil {
 		return "", errors.New("request is required")
 	}
-	value := request.Header.Get(IdempotencyKeyHeader)
+	values := request.Header.Values(IdempotencyKeyHeader)
+	if len(values) != 1 {
+		return "", errors.New("exactly one idempotency key is required")
+	}
+	value := values[0]
 	if err := jobs.ValidateIdempotencyKey(value); err != nil {
 		return "", err
 	}

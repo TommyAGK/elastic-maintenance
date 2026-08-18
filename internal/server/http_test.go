@@ -145,7 +145,7 @@ func TestMutationJobPlaceholdersEnforceRoleAndRequestContract(t *testing.T) {
 		wantStatus  int
 		wantCode    string
 	}{
-		"validation planner":   {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/validations", contentType: "application/json", key: "validation-request-1", wantStatus: http.StatusNotImplemented, wantCode: "job_execution_not_implemented"},
+		"validation planner":   {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/validations", contentType: "application/json", key: "validation-request-1", wantStatus: http.StatusServiceUnavailable, wantCode: "validation_unavailable"},
 		"plan planner":         {roles: []auth.Role{auth.RolePlanner}, method: http.MethodPost, path: "/api/v1/plans", contentType: "application/json; charset=utf-8", key: "plan-request-1", wantStatus: http.StatusNotImplemented, wantCode: "job_execution_not_implemented"},
 		"apply applier":        {roles: []auth.Role{auth.RoleApplier}, method: http.MethodPost, path: "/api/v1/plans/plan-1/apply", contentType: "application/json", key: "apply-request-1", wantStatus: http.StatusNotImplemented, wantCode: "job_execution_not_implemented"},
 		"viewer denied":        {roles: []auth.Role{auth.RoleViewer}, method: http.MethodPost, path: "/api/v1/plans", contentType: "application/json", key: "plan-request-1", wantStatus: http.StatusForbidden, wantCode: "permission_denied"},

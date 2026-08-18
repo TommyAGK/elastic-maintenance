@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,8 @@ import (
 )
 
 const maxSelectionIDs = 100
+
+var selectionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type StartRequest struct {
 	ActorSubject   string
@@ -42,9 +45,11 @@ type Service struct {
 	generator  jobs.IDGenerator
 	queue      chan string
 	slots      chan struct{}
+	executions chan struct{}
 	root       context.Context
 	stop       context.CancelFunc
 	workers    sync.WaitGroup
+	direct     sync.WaitGroup
 	mu         sync.Mutex
 	closed     bool
 	active     map[string]context.CancelFunc
@@ -86,7 +91,7 @@ func NewService(options Options) (*Service, error) {
 	root, stop := context.WithCancel(context.Background())
 	service := &Service{
 		inputs: options.Inputs, repository: options.Repository, clock: options.Clock, generator: options.IDGenerator,
-		queue: make(chan string, options.QueueCapacity), slots: make(chan struct{}, options.QueueCapacity+options.Workers),
+		queue: make(chan string, options.QueueCapacity), slots: make(chan struct{}, options.QueueCapacity+options.Workers), executions: make(chan struct{}, options.Workers),
 		root: root, stop: stop, active: make(map[string]context.CancelFunc),
 	}
 	for index := 0; index < options.Workers; index++ {
@@ -170,6 +175,35 @@ func (service *Service) Start(ctx context.Context, request StartRequest) (jobs.J
 	}
 }
 
+func (service *Service) CurrentSnapshot(ctx context.Context) (*manifest.SourceSnapshot, error) {
+	service.mu.Lock()
+	if service.closed {
+		service.mu.Unlock()
+		return nil, jobs.ErrQueueClosed
+	}
+	service.direct.Add(1)
+	service.mu.Unlock()
+	defer service.direct.Done()
+	directCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(service.root, cancel)
+	defer func() { stop(); cancel() }()
+	return service.buildSnapshot(directCtx)
+}
+
+func (service *Service) buildSnapshot(ctx context.Context) (*manifest.SourceSnapshot, error) {
+	select {
+	case service.executions <- struct{}{}:
+		defer func() { <-service.executions }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	inputs, err := service.inputs.Read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return manifest.BuildSourceSnapshotContext(ctx, inputs.Config, inputs.ResourceSets)
+}
+
 func (service *Service) Get(ctx context.Context, id string) (Record, error) {
 	return service.repository.Get(ctx, id)
 }
@@ -230,7 +264,7 @@ func (service *Service) Shutdown(ctx context.Context) error {
 	}
 	service.mu.Unlock()
 	done := make(chan struct{})
-	go func() { service.workers.Wait(); close(done) }()
+	go func() { service.workers.Wait(); service.direct.Wait(); close(done) }()
 	select {
 	case <-done:
 		return nil
@@ -266,11 +300,7 @@ func (service *Service) execute(id string) {
 	}
 	defer func() { cancel(); service.mu.Lock(); delete(service.active, id); service.mu.Unlock() }()
 
-	inputs, readErr := service.inputs.Read(jobCtx)
-	var snapshot *manifest.SourceSnapshot
-	if readErr == nil {
-		snapshot, readErr = manifest.BuildSourceSnapshotContext(jobCtx, inputs.Config, inputs.ResourceSets)
-	}
+	snapshot, readErr := service.buildSnapshot(jobCtx)
 	if jobCtx.Err() != nil {
 		service.finish(id, jobs.StatusCanceled, nil, "")
 		return
@@ -452,7 +482,7 @@ func normalizeSelection(selection Selection) (Selection, error) {
 		result := append([]string{}, values...)
 		sort.Strings(result)
 		for index, value := range result {
-			if len(value) > 128 || value == "" || strings.ContainsAny(value, " /\\\t\r\n") {
+			if !selectionIDPattern.MatchString(value) {
 				return nil, errors.New("validation selection contains an invalid id")
 			}
 			if index != 0 && result[index-1] == value {
