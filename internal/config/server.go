@@ -51,6 +51,7 @@ type ServerConfig struct {
 	CORSAllowedOrigins []string                     `yaml:"corsAllowedOrigins,omitempty"`
 	MountRoots         []string                     `yaml:"mountRoots"`
 	OIDC               OIDCConfig                   `yaml:"oidc"`
+	BreakGlass         BreakGlassConfig             `yaml:"breakGlass,omitempty"`
 	Authorization      AuthorizationConfig          `yaml:"authorization"`
 	SecretPolicy       KubernetesSecretPolicy       `yaml:"secretPolicy"`
 	ResourceSets       map[string]ResourceSetConfig `yaml:"resourceSets,omitempty"`
@@ -71,6 +72,12 @@ type OIDCConfig struct {
 	EndpointOrigins  []string     `yaml:"endpointOrigins,omitempty"`
 	SubjectClaim     string       `yaml:"subjectClaim,omitempty"`
 	DisplayNameClaim string       `yaml:"displayNameClaim,omitempty"`
+}
+
+type BreakGlassConfig struct {
+	Enabled          bool         `yaml:"enabled,omitempty"`
+	Username         string       `yaml:"username,omitempty"`
+	CredentialSecret SecretKeyRef `yaml:"credentialSecret,omitempty"`
 }
 
 type SecretKeyRef struct {
@@ -366,7 +373,10 @@ func (cfg *ServerConfig) ValidateStartup() error {
 		}
 	}
 
-	oidcConfigured := cfg.OIDC.Enabled || cfg.OIDC.IssuerURL != "" || cfg.OIDC.ClientID != "" || cfg.OIDC.ClientSecret != (SecretKeyRef{}) || cfg.OIDC.SessionSecret != (SecretKeyRef{}) || cfg.OIDC.RedirectURL != "" || len(cfg.OIDC.Scopes) != 0 || len(cfg.OIDC.EndpointOrigins) != 0 || cfg.OIDC.SubjectClaim != "" || cfg.OIDC.DisplayNameClaim != ""
+	// The session Secret is also the shared break-glass session key. It must
+	// not, by itself, turn a disabled OIDC provider into a partially configured
+	// OIDC deployment.
+	oidcConfigured := cfg.OIDC.Enabled || cfg.OIDC.IssuerURL != "" || cfg.OIDC.ClientID != "" || cfg.OIDC.ClientSecret != (SecretKeyRef{}) || cfg.OIDC.RedirectURL != "" || len(cfg.OIDC.Scopes) != 0 || len(cfg.OIDC.EndpointOrigins) != 0 || cfg.OIDC.SubjectClaim != "" || cfg.OIDC.DisplayNameClaim != ""
 	if oidcConfigured {
 		if err := validateAbsoluteDir("oidc.secretMountRoot", cfg.OIDC.SecretMountRoot); err != nil {
 			add("%v", err)
@@ -469,6 +479,12 @@ func (cfg *ServerConfig) ValidateStartup() error {
 		}
 	}
 
+	// Break-glass reuses OIDC's mounted secret root and session key. When OIDC
+	// is configured, those shared fields have already been checked above.
+	for _, problem := range validateBreakGlassConfig(cfg, oidcConfigured) {
+		add("%s", problem)
+	}
+
 	for _, name := range sortedStringKeys(cfg.ResourceSets) {
 		set := cfg.ResourceSets[name]
 		if !resourceIdentifierPattern.MatchString(name) {
@@ -529,6 +545,59 @@ func (cfg *ServerConfig) ValidateStartup() error {
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// ValidateBreakGlass validates the local emergency administrator portion of a
+// server configuration without requiring unrelated server inputs. It is useful
+// to live configuration readers that reload only the authentication settings.
+func (cfg *ServerConfig) ValidateBreakGlass() error {
+	if cfg == nil {
+		return errors.New("server config is nil")
+	}
+	problems := validateBreakGlassConfig(cfg, false)
+	if len(problems) != 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func validateBreakGlassConfig(cfg *ServerConfig, sharedFieldsAlreadyValidated bool) []string {
+	if cfg == nil {
+		return []string{"server config is nil"}
+	}
+	var problems []string
+	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+	ref := cfg.BreakGlass.CredentialSecret
+	configured := cfg.BreakGlass.Enabled || cfg.BreakGlass.Username != "" || ref != (SecretKeyRef{})
+	if !configured {
+		return nil
+	}
+	if !cfg.BreakGlass.Enabled {
+		add("breakGlass must not configure username or credentialSecret when disabled")
+		return problems
+	}
+	if len(cfg.BreakGlass.Username) == 0 || len(cfg.BreakGlass.Username) > 128 || strings.TrimSpace(cfg.BreakGlass.Username) != cfg.BreakGlass.Username || !identifierPattern.MatchString(cfg.BreakGlass.Username) {
+		add("breakGlass.username must be one canonical username of at most 128 characters using letters, digits, underscore, dot, or dash")
+	}
+	if !sharedFieldsAlreadyValidated {
+		if err := validateAbsoluteDir("oidc.secretMountRoot", cfg.OIDC.SecretMountRoot); err != nil {
+			add("%v", err)
+		}
+		validateSecretKeyRef("oidc.sessionSecret", cfg.OIDC.SessionSecret, &problems)
+	}
+	validateSecretKeyRef("breakGlass.credentialSecret", ref, &problems)
+	if cfg.SecretPolicy.Namespace != "" {
+		if cfg.OIDC.SessionSecret.Namespace != cfg.SecretPolicy.Namespace {
+			add("oidc.sessionSecret.namespace must equal secretPolicy.namespace")
+		}
+		if ref.Namespace != cfg.SecretPolicy.Namespace {
+			add("breakGlass.credentialSecret.namespace must equal secretPolicy.namespace")
+		}
+	}
+	if ref.Namespace == cfg.OIDC.SessionSecret.Namespace && ref.Name == cfg.OIDC.SessionSecret.Name {
+		add("breakGlass.credentialSecret must use a dedicated Secret distinct from oidc.sessionSecret")
+	}
+	return problems
 }
 
 func sortedStringKeys[V any](values map[string]V) []string {

@@ -131,31 +131,67 @@ func (codec *cookieCodec) encode(ctx context.Context, purpose string, value any)
 	return encoded, nil
 }
 func (codec *cookieCodec) decode(ctx context.Context, purpose, encoded string, destination any) error {
-	if len(encoded) == 0 || len(encoded) > maxCookieBytes {
-		return errors.New("protected cookie is invalid")
-	}
-	parts := strings.Split(encoded, ".")
-	if len(parts) != 3 || parts[0] != "v1" || !keyIDPattern.MatchString(parts[1]) {
-		return errors.New("protected cookie is invalid")
+	parts, err := parseProtectedCookie(encoded)
+	if err != nil {
+		return err
 	}
 	ring, err := codec.keys.load(ctx)
 	if err != nil {
 		return err
 	}
-	key, exists := ring.all[parts[1]]
+	key, exists := ring.all[parts.keyID]
 	if !exists {
 		return errors.New("protected cookie is invalid")
 	}
+	return decodeProtectedCookie(parts, key, purpose, destination)
+}
+
+// decodeCurrent is deliberately stricter than decode: sessions which were
+// encrypted with a previous key remain useful to OIDC's rotation overlap, but
+// are not accepted for break-glass access. This lets key rotation immediately
+// terminate emergency sessions without changing OIDC behavior.
+func (codec *cookieCodec) decodeCurrent(ctx context.Context, purpose, encoded string, destination any) error {
+	parts, err := parseProtectedCookie(encoded)
+	if err != nil {
+		return err
+	}
+	ring, err := codec.keys.load(ctx)
+	if err != nil {
+		return err
+	}
+	if parts.keyID != ring.current.id {
+		return errors.New("protected cookie is invalid")
+	}
+	return decodeProtectedCookie(parts, ring.current, purpose, destination)
+}
+
+type protectedCookie struct {
+	keyID  string
+	sealed []byte
+}
+
+func parseProtectedCookie(encoded string) (protectedCookie, error) {
+	if len(encoded) == 0 || len(encoded) > maxCookieBytes {
+		return protectedCookie{}, errors.New("protected cookie is invalid")
+	}
+	parts := strings.Split(encoded, ".")
+	if len(parts) != 3 || parts[0] != "v1" || !keyIDPattern.MatchString(parts[1]) {
+		return protectedCookie{}, errors.New("protected cookie is invalid")
+	}
 	sealed, err := base64.RawURLEncoding.Strict().DecodeString(parts[2])
 	if err != nil {
-		return errors.New("protected cookie is invalid")
+		return protectedCookie{}, errors.New("protected cookie is invalid")
 	}
+	return protectedCookie{keyID: parts[1], sealed: sealed}, nil
+}
+
+func decodeProtectedCookie(parts protectedCookie, key cookieKey, purpose string, destination any) error {
 	block, _ := aes.NewCipher(deriveCookieKey(key.value, purpose))
 	gcm, _ := cipher.NewGCM(block)
-	if len(sealed) < gcm.NonceSize() {
+	if len(parts.sealed) < gcm.NonceSize() {
 		return errors.New("protected cookie is invalid")
 	}
-	plaintext, err := gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], cookieAAD(purpose, key.id))
+	plaintext, err := gcm.Open(nil, parts.sealed[:gcm.NonceSize()], parts.sealed[gcm.NonceSize():], cookieAAD(purpose, key.id))
 	if err != nil {
 		return errors.New("protected cookie is invalid")
 	}
@@ -179,6 +215,7 @@ type sessionPayload struct {
 	Version   string `json:"v"`
 	Actor     Actor  `json:"actor"`
 	Method    Method `json:"method"`
+	Revision  string `json:"rev,omitempty"`
 	IssuedAt  int64  `json:"iat"`
 	ExpiresAt int64  `json:"exp"`
 }
