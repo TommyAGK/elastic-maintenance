@@ -15,6 +15,8 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+func testBreakGlassAudit(context.Context, BreakGlassAuditEvent) error { return nil }
+
 func TestBreakGlassLoginAndLiveSessionValidation(t *testing.T) {
 	clock := time.Now().UTC().Truncate(time.Second)
 	generation := randomBreakGlassGeneration(t)
@@ -23,7 +25,7 @@ func TestBreakGlassLoginAndLiveSessionValidation(t *testing.T) {
 	ref := config.SecretKeyRef{Namespace: "ns", Name: "break-glass", Key: "credential"}
 	cfg := breakGlassConfig(ref)
 	secrets := memorySecrets{"keys": keyRingFixture("active", nil), "credential": credential}
-	service, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets, Now: func() time.Time { return clock }})
+	service, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets, Audit: testBreakGlassAudit, Now: func() time.Time { return clock }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +37,7 @@ func TestBreakGlassLoginAndLiveSessionValidation(t *testing.T) {
 	if err := service.Login(response, request); err != nil {
 		t.Fatalf("Login() error=%v", err)
 	}
-	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/" {
+	if response.Code != http.StatusOK || response.Header().Get("Location") != "" {
 		t.Fatalf("login response status=%d location=%q", response.Code, response.Header().Get("Location"))
 	}
 	session := cookieByName(t, response.Result().Cookies(), SessionCookieName)
@@ -56,8 +58,9 @@ func TestBreakGlassLoginAndLiveSessionValidation(t *testing.T) {
 		t.Fatalf("actor=%#v", actor)
 	}
 
+	keys, _ := newKeyRingSource(secrets, cfg.OIDC.SessionSecret)
 	var payload sessionPayload
-	if err := service.cookies.decode(context.Background(), "session", session.Value, &payload); err != nil {
+	if err := newCookieCodec(keys, func() time.Time { return clock }).decode(context.Background(), "session", session.Value, &payload); err != nil {
 		t.Fatal(err)
 	}
 	if payload.Revision == "" || payload.Method != MethodBreakGlass || payload.ExpiresAt-payload.IssuedAt != int64(BreakGlassSessionLifetime/time.Second) {
@@ -77,7 +80,7 @@ func TestBreakGlassRejectsPreviousSessionKeyButOIDCCodecKeepsOverlap(t *testing.
 	ref := config.SecretKeyRef{Namespace: "ns", Name: "break-glass", Key: "credential"}
 	cfg := breakGlassConfig(ref)
 	secrets := memorySecrets{"keys": keyRingFixture("one", nil), "credential": breakGlassCredentialFixture(t, randomBreakGlassGeneration(t), password)}
-	service, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets})
+	service, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets, Audit: testBreakGlassAudit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +94,9 @@ func TestBreakGlassRejectsPreviousSessionKeyButOIDCCodecKeepsOverlap(t *testing.
 	if _, err := service.Authenticate(request); !errors.Is(err, ErrInvalidAuthentication) {
 		t.Fatalf("previous key was accepted: %v", err)
 	}
+	keys, _ := newKeyRingSource(secrets, cfg.OIDC.SessionSecret)
 	var payload sessionPayload
-	if err := service.cookies.decode(context.Background(), "session", cookie, &payload); err != nil {
+	if err := newCookieCodec(keys, time.Now).decode(context.Background(), "session", cookie, &payload); err != nil {
 		t.Fatalf("OIDC-compatible cookie decoder rejected previous key: %v", err)
 	}
 }
@@ -102,7 +106,7 @@ func TestBreakGlassLoginRequiresSameOriginPOSTAndGenericFailure(t *testing.T) {
 	ref := config.SecretKeyRef{Namespace: "ns", Name: "break-glass", Key: "credential"}
 	cfg := breakGlassConfig(ref)
 	secrets := memorySecrets{"keys": keyRingFixture("active", nil), "credential": breakGlassCredentialFixture(t, randomBreakGlassGeneration(t), password)}
-	service, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets})
+	service, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets, Audit: testBreakGlassAudit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,9 +119,12 @@ func TestBreakGlassLoginRequiresSameOriginPOSTAndGenericFailure(t *testing.T) {
 		return request
 	}
 	for name, request := range map[string]*http.Request{
-		"get":            newRequest(http.MethodGet, "https://app.example.test", "{}"),
-		"missing origin": newRequest(http.MethodPost, "", `{"username":"break-glass-admin","password":"`+password+`"}`),
-		"other origin":   newRequest(http.MethodPost, "https://other.example.test", `{"username":"break-glass-admin","password":"`+password+`"}`),
+		"get":             newRequest(http.MethodGet, "https://app.example.test", "{}"),
+		"missing origin":  newRequest(http.MethodPost, "", `{"username":"break-glass-admin","password":"`+password+`"}`),
+		"other origin":    newRequest(http.MethodPost, "https://other.example.test", `{"username":"break-glass-admin","password":"`+password+`"}`),
+		"null field":      newRequest(http.MethodPost, "https://app.example.test", `{"username":null,"password":"x"}`),
+		"duplicate field": newRequest(http.MethodPost, "https://app.example.test", `{"username":"a","username":"b","password":"x"}`),
+		"unknown field":   newRequest(http.MethodPost, "https://app.example.test", `{"username":"a","password":"x","extra":true}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := service.Login(httptest.NewRecorder(), request); err == nil {
@@ -134,6 +141,49 @@ func TestBreakGlassLoginRequiresSameOriginPOSTAndGenericFailure(t *testing.T) {
 	}
 }
 
+func TestBreakGlassAuditFailurePreventsSession(t *testing.T) {
+	password := "audit-sentinel-password"
+	ref := config.SecretKeyRef{Namespace: "ns", Name: "break-glass", Key: "credential"}
+	cfg := breakGlassConfig(ref)
+	secrets := memorySecrets{"keys": keyRingFixture("active", nil), "credential": breakGlassCredentialFixture(t, randomBreakGlassGeneration(t), password)}
+	var events []BreakGlassAuditEvent
+	service, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets, Audit: func(_ context.Context, event BreakGlassAuditEvent) error {
+		events = append(events, event)
+		if event.Outcome == "succeeded" {
+			return errors.New("audit unavailable")
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://app.example.test/auth/break-glass/login", strings.NewReader(`{"username":"break-glass-admin","password":"`+password+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://app.example.test")
+	response := httptest.NewRecorder()
+	if err := service.Login(response, request); !errors.Is(err, ErrBreakGlassAuthenticationFailed) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(response.Result().Cookies()) != 0 || len(events) != 1 || events[0].Actor == nil {
+		t.Fatalf("cookies/events=%#v %#v", response.Result().Cookies(), events)
+	}
+}
+
+func TestBreakGlassLoginRejectsFormEncoding(t *testing.T) {
+	ref := config.SecretKeyRef{Namespace: "ns", Name: "break-glass", Key: "credential"}
+	cfg := breakGlassConfig(ref)
+	service, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: memorySecrets{"keys": keyRingFixture("active", nil), "credential": breakGlassCredentialFixture(t, randomBreakGlassGeneration(t), "password")}, Audit: testBreakGlassAudit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://app.example.test/auth/break-glass/login", strings.NewReader("username=x&password=y"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "https://app.example.test")
+	if err := service.Login(httptest.NewRecorder(), request); !errors.Is(err, ErrBreakGlassUnsupportedMediaType) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestBreakGlassThrottlesAndExpiresWithoutRenewal(t *testing.T) {
 	clock := time.Now().UTC().Truncate(time.Second)
 	password := "correct horse battery staple"
@@ -141,7 +191,7 @@ func TestBreakGlassThrottlesAndExpiresWithoutRenewal(t *testing.T) {
 	cfg := breakGlassConfig(ref)
 	secrets := memorySecrets{"keys": keyRingFixture("active", nil), "credential": breakGlassCredentialFixture(t, randomBreakGlassGeneration(t), password)}
 	service, err := NewBreakGlass(BreakGlassOptions{
-		Config: cfg, Secrets: secrets, Now: func() time.Time { return clock },
+		Config: cfg, Secrets: secrets, Audit: testBreakGlassAudit, Now: func() time.Time { return clock },
 		Throttle: BreakGlassThrottleOptions{FailuresBeforeLockout: 2, BaseDelay: 0},
 	})
 	if err != nil {
@@ -161,7 +211,7 @@ func TestBreakGlassThrottlesAndExpiresWithoutRenewal(t *testing.T) {
 	}
 
 	// A separate service demonstrates the absolute expiry and lack of renewal.
-	service, err = NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets, Now: func() time.Time { return clock }})
+	service, err = NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets, Audit: testBreakGlassAudit, Now: func() time.Time { return clock }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +232,7 @@ func TestBreakGlassThrottlesAndExpiresWithoutRenewal(t *testing.T) {
 
 func TestBreakGlassCredentialDocumentIsStrictAndPinned(t *testing.T) {
 	generation := strings.TrimRight(base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef")), "=")
-	valid := []byte("elastic-maintainer-break-glass/v1\ngeneration " + generation + "\nverifier $argon2id$v=19$m=65536,t=3,p=1$......................$...........................................\n")
+	valid := []byte("elastic-maintainer-break-glass/v1\ngeneration " + generation + "\nverifier $argon2id$v=19$m=65536,t=3,p=1$" + base64.RawStdEncoding.EncodeToString(make([]byte, 16)) + "$" + base64.RawStdEncoding.EncodeToString(make([]byte, 32)) + "\n")
 	if _, err := ParseBreakGlassCredential(valid); err != nil {
 		t.Fatalf("valid document error=%v", err)
 	}
@@ -222,17 +272,7 @@ func breakGlassCredentialFixture(t *testing.T, generation, password string) []by
 	return []byte(breakGlassCredentialHeader + "\ngeneration " + generation + "\nverifier $argon2id$v=19$m=65536,t=3,p=1$" + encodeBreakGlassPHC(salt) + "$" + encodeBreakGlassPHC(hash) + "\n")
 }
 
-func encodeBreakGlassPHC(value []byte) string {
-	const standard = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	const phc = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	encoded := base64.RawStdEncoding.EncodeToString(value)
-	var result strings.Builder
-	result.Grow(len(encoded))
-	for _, char := range encoded {
-		result.WriteByte(phc[strings.IndexRune(standard, char)])
-	}
-	return result.String()
-}
+func encodeBreakGlassPHC(value []byte) string { return base64.RawStdEncoding.EncodeToString(value) }
 
 func randomBreakGlassGeneration(t *testing.T) string {
 	t.Helper()

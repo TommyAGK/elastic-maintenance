@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"regexp"
 	"time"
 
@@ -13,6 +14,7 @@ type Action string
 
 const (
 	ActionLogin            Action = "auth.login"
+	ActionBreakGlassLogin  Action = "auth.break_glass.login"
 	ActionLogout           Action = "auth.logout"
 	ActionCredentialUpload Action = "credentials.upload"
 	ActionCredentialRotate Action = "credentials.rotate"
@@ -33,7 +35,7 @@ const (
 var (
 	auditCodePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 	knownActions     = map[Action]struct{}{
-		ActionLogin: {}, ActionLogout: {},
+		ActionLogin: {}, ActionBreakGlassLogin: {}, ActionLogout: {},
 		ActionCredentialUpload: {}, ActionCredentialRotate: {}, ActionCredentialDelete: {},
 		ActionValidationCreate: {}, ActionPlanCreate: {}, ActionPlanApply: {},
 	}
@@ -95,3 +97,22 @@ type Recorder interface {
 type NopRecorder struct{}
 
 func (NopRecorder) Record(context.Context, Event) error { return nil }
+
+type LogRecorder struct{ Logger *slog.Logger }
+
+func (recorder LogRecorder) Record(ctx context.Context, event Event) error {
+	if recorder.Logger == nil {
+		return errors.New("audit logger is required")
+	}
+	if err := event.Validate(); err != nil {
+		return err
+	}
+	actor := ""
+	method := ""
+	if event.Actor != nil {
+		actor = event.Actor.Subject
+		method = string(event.Actor.Method)
+	}
+	recorder.Logger.WarnContext(ctx, "Security audit event", "action", event.Action, "outcome", event.Outcome, "reason_code", event.ReasonCode, "request_id", event.RequestID, "actor", actor, "authentication_method", method)
+	return nil
+}

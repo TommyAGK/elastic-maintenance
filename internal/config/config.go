@@ -8,7 +8,7 @@ import (
 
 type DesiredState struct {
 	Integrations  []Integration `json:"integrations"`
-	FleetPolicies []FleetPolicy  `json:"fleet_policies"`
+	FleetPolicies []FleetPolicy `json:"fleet_policies"`
 	Rules         []Rule        `json:"rules"`
 }
 

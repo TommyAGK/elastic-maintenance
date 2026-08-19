@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 )
@@ -25,6 +26,7 @@ type SessionResponse struct {
 	Authenticated        bool        `json:"authenticated"`
 	AuthenticationMethod auth.Method `json:"authenticationMethod"`
 	Actor                auth.Actor  `json:"actor"`
+	ExpiresAt            *time.Time  `json:"expiresAt,omitempty"`
 }
 
 func WriteJSON(w http.ResponseWriter, request *http.Request, status int, value any) {

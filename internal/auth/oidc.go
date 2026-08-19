@@ -111,6 +111,7 @@ func (service *BrowserOIDC) Authenticate(request *http.Request) (Actor, error) {
 	}
 	payload.Actor.Method = payload.Method
 	actor, err := payload.Actor.Normalized()
+	actor.SessionExpiresAt = time.Unix(payload.ExpiresAt, 0).UTC()
 	if err != nil || actor.Method != MethodOIDC {
 		return Actor{}, ErrInvalidAuthentication
 	}

@@ -51,6 +51,9 @@ var (
 	ErrBreakGlassThrottled            = errors.New("break-glass authentication throttled")
 	ErrBreakGlassMethodNotAllowed     = errors.New("break-glass login method is not allowed")
 	ErrBreakGlassInvalidRequest       = errors.New("break-glass login request is invalid")
+	ErrBreakGlassRequestTooLarge      = errors.New("break-glass login request is too large")
+	ErrBreakGlassUnsupportedMediaType = errors.New("break-glass login content type is unsupported")
+	ErrBreakGlassUnavailable          = errors.New("break-glass credential is unavailable")
 
 	// Short aliases make the safe outcomes convenient for HTTP adapters while
 	// retaining the more specific names for callers that have several auth
@@ -80,7 +83,7 @@ func (source fileBreakGlassConfigSource) Load(ctx context.Context) (*config.Serv
 
 type BreakGlassThrottleOptions struct {
 	// MaxSources bounds the source-key map. A source is the untrusted peer
-	// address, never an X-Forwarded-For value.
+	// address, or one canonical X-Forwarded-For address from a trusted proxy.
 	MaxSources int
 	// MaxSourceEntries is accepted as a descriptive alias for MaxSources.
 	MaxSourceEntries int
@@ -92,16 +95,26 @@ type BreakGlassThrottleOptions struct {
 	MaxDelay              time.Duration
 }
 
+type BreakGlassAuditEvent struct {
+	Action     string
+	Actor      *Actor
+	Outcome    string
+	ReasonCode string
+}
+type BreakGlassAuditFunc func(context.Context, BreakGlassAuditEvent) error
+
 type BreakGlassOptions struct {
 	// ConfigSource is consulted for every login and Authenticate call. Config
 	// is a convenient static/injectable source for tests; ConfigPath is the
 	// production-friendly live file source.
-	Config       *config.ServerConfig
-	ConfigSource BreakGlassConfigSource
-	ConfigPath   string
-	Secrets      secretmount.Reader
-	Now          func() time.Time
-	Throttle     BreakGlassThrottleOptions
+	Config         *config.ServerConfig
+	ConfigSource   BreakGlassConfigSource
+	ConfigPath     string
+	Secrets        secretmount.Reader
+	Now            func() time.Time
+	Throttle       BreakGlassThrottleOptions
+	Audit          BreakGlassAuditFunc
+	TrustedProxies []string
 }
 
 type BreakGlassLoginRequest struct {
@@ -125,15 +138,17 @@ type breakGlassState struct {
 	credential BreakGlassCredential
 	verifier   breakGlassVerifier
 	revision   string
+	cookies    *cookieCodec
 }
 
 type BreakGlassService struct {
-	configSource BreakGlassConfigSource
-	secrets      secretmount.Reader
-	cookies      *cookieCodec
-	now          func() time.Time
-	throttle     *breakGlassThrottle
-	argon2       chan struct{}
+	configSource   BreakGlassConfigSource
+	secrets        secretmount.Reader
+	now            func() time.Time
+	throttle       *breakGlassThrottle
+	argon2         chan struct{}
+	audit          BreakGlassAuditFunc
+	trustedProxies []*net.IPNet
 }
 
 // BreakGlass is retained as a concise integration name without hiding the
@@ -155,6 +170,9 @@ func NewBreakGlass(options BreakGlassOptions) (*BreakGlassService, error) {
 	if !initial.BreakGlass.Enabled {
 		return nil, ErrBreakGlassDisabled
 	}
+	if options.Audit == nil {
+		return nil, errors.New("break-glass audit hook is required")
+	}
 
 	secrets := options.Secrets
 	if secrets == nil {
@@ -163,22 +181,30 @@ func NewBreakGlass(options BreakGlassOptions) (*BreakGlassService, error) {
 			return nil, fmt.Errorf("open break-glass secret mounts: %w", err)
 		}
 	}
-	keys, err := newKeyRingSource(secrets, initial.OIDC.SessionSecret)
-	if err != nil {
+	if _, err = newKeyRingSource(secrets, initial.OIDC.SessionSecret); err != nil {
 		return nil, err
 	}
 	throttle, err := newBreakGlassThrottle(options.Throttle)
 	if err != nil {
 		return nil, err
 	}
+	trusted := make([]*net.IPNet, 0, len(options.TrustedProxies))
+	for _, value := range options.TrustedProxies {
+		_, network, parseErr := net.ParseCIDR(value)
+		if parseErr != nil {
+			return nil, errors.New("trusted proxy configuration is invalid")
+		}
+		trusted = append(trusted, network)
+	}
 	maxConcurrency := normalizedArgon2Concurrency(options.Throttle.MaxArgon2Concurrency)
 	return &BreakGlassService{
-		configSource: source,
-		secrets:      secrets,
-		cookies:      newCookieCodec(keys, options.Now),
-		now:          normalizeClock(options.Now),
-		throttle:     throttle,
-		argon2:       make(chan struct{}, maxConcurrency),
+		configSource:   source,
+		secrets:        secrets,
+		now:            normalizeClock(options.Now),
+		throttle:       throttle,
+		argon2:         make(chan struct{}, maxConcurrency),
+		audit:          options.Audit,
+		trustedProxies: trusted,
 	}, nil
 }
 
@@ -242,38 +268,84 @@ func (service *BreakGlassService) Login(w http.ResponseWriter, request *http.Req
 		return ErrBreakGlassInvalidRequest
 	}
 	if request.Method != http.MethodPost {
+		service.recordLogin(request.Context(), nil, "denied", "invalid_request")
 		return ErrBreakGlassMethodNotAllowed
 	}
 	if request.URL.RawQuery != "" || request.URL.Fragment != "" {
+		service.recordLogin(request.Context(), nil, "denied", "invalid_request")
 		return ErrBreakGlassInvalidRequest
 	}
 	if len(request.Header.Values("Authorization")) != 0 {
+		service.recordLogin(request.Context(), nil, "denied", "identity_conflict")
 		return ErrAuthenticationConflict
 	}
 	if hasNamedCookie(request, SessionCookieName) {
+		service.recordLogin(request.Context(), nil, "denied", "identity_conflict")
 		return ErrAuthenticationConflict
 	}
 	if err := service.validSameOriginRequest(request); err != nil {
+		service.recordLogin(request.Context(), nil, "denied", "invalid_origin")
 		return err
 	}
 	input, err := decodeBreakGlassLoginInput(request)
 	if err != nil {
+		service.recordLogin(request.Context(), nil, "denied", "invalid_request")
 		return err
 	}
-	encoded, expires, err := service.authenticateCredentials(request.Context(), requestSource(request), input.Username, input.Password)
+	encoded, expires, err := service.authenticateCredentials(request.Context(), service.requestSource(request), input.Username, input.Password)
 	if err != nil {
+		reason := "credentials_rejected"
+		if errors.Is(err, ErrBreakGlassThrottled) {
+			reason = "throttled"
+		} else if errors.Is(err, ErrBreakGlassUnavailable) {
+			reason = "credential_unavailable"
+		}
+		service.recordLogin(request.Context(), nil, "denied", reason)
 		return err
+	}
+	actor := Actor{Subject: input.Username, Roles: []Role{RoleAdministrator}, Method: MethodBreakGlass}
+	if service.recordLogin(request.Context(), &actor, "succeeded", "") != nil {
+		return ErrBreakGlassAuthenticationFailed
 	}
 	setProtectedCookie(w, SessionCookieName, encoded, expires)
-	http.Redirect(w, request, "/", http.StatusSeeOther)
 	return nil
 }
 
 // BeginLogin is an integration alias. Unlike BrowserOIDC.BeginLogin, this
 // method is deliberately POST-only because break-glass is never an implicit
 // browser fallback.
+func (service *BreakGlassService) recordLogin(ctx context.Context, actor *Actor, outcome, reason string) error {
+	if service.audit == nil {
+		return nil
+	}
+	return service.audit(ctx, BreakGlassAuditEvent{Action: "login", Actor: actor, Outcome: outcome, ReasonCode: reason})
+}
+
 func (service *BreakGlassService) BeginLogin(w http.ResponseWriter, request *http.Request) error {
 	return service.Login(w, request)
+}
+func (service *BreakGlassService) CompleteCallback(http.ResponseWriter, *http.Request) error {
+	return ErrOIDCDisabled
+}
+func (service *BreakGlassService) Logout(w http.ResponseWriter, request *http.Request) error {
+	if request == nil || request.Method != http.MethodPost {
+		return ErrBreakGlassInvalidRequest
+	}
+	if err := service.validSameOriginRequest(request); err != nil {
+		if service.recordLogin(request.Context(), nil, "denied", "invalid_origin") != nil {
+			return ErrBreakGlassUnavailable
+		}
+		return err
+	}
+	actor, _ := ActorFromContext(request.Context())
+	if service.audit != nil {
+		if err := service.audit(request.Context(), BreakGlassAuditEvent{Action: "logout", Actor: &actor, Outcome: "succeeded"}); err != nil {
+			return ErrBreakGlassAuthenticationFailed
+		}
+	}
+	clearProtectedCookie(w, SessionCookieName)
+	clearProtectedCookie(w, TransactionCookieName)
+	return nil
 }
 
 // AuthenticateCredentials is the non-HTTP seam for a future server adapter.
@@ -284,11 +356,7 @@ func (service *BreakGlassService) AuthenticateCredentials(ctx context.Context, u
 }
 
 func (service *BreakGlassService) authenticateCredentials(ctx context.Context, source, username, password string) (string, time.Time, error) {
-	state, err := service.loadState(ctx)
-	if err != nil {
-		return "", time.Time{}, ErrBreakGlassAuthenticationFailed
-	}
-	if len(username) == 0 || len(username) > 128 || len(password) > BreakGlassPasswordMaxBytes {
+	if len(username) == 0 || len(username) > 128 || len(password) == 0 || len(password) > BreakGlassPasswordMaxBytes {
 		return "", time.Time{}, ErrBreakGlassAuthenticationFailed
 	}
 	if source == "" {
@@ -302,6 +370,10 @@ func (service *BreakGlassService) authenticateCredentials(ctx context.Context, s
 		}
 	}
 
+	state, err := service.loadState(ctx)
+	if err != nil {
+		return "", time.Time{}, ErrBreakGlassUnavailable
+	}
 	select {
 	case service.argon2 <- struct{}{}:
 		defer func() { <-service.argon2 }()
@@ -332,7 +404,7 @@ func (service *BreakGlassService) authenticateCredentials(ctx context.Context, s
 		IssuedAt:  now.Unix(),
 		ExpiresAt: expires.Unix(),
 	}
-	encoded, err := service.cookies.encode(ctx, "session", payload)
+	encoded, err := state.cookies.encode(ctx, "session", payload)
 	if err != nil {
 		return "", time.Time{}, ErrBreakGlassAuthenticationFailed
 	}
@@ -344,13 +416,6 @@ func (service *BreakGlassService) Authenticate(request *http.Request) (Actor, er
 	if service == nil || request == nil {
 		return Actor{}, ErrAuthenticationRequired
 	}
-	// Load both live inputs before inspecting the cookie. This intentionally
-	// fails closed on a Secret/config rotation even for a previously valid
-	// emergency session.
-	state, err := service.loadState(request.Context())
-	if err != nil {
-		return Actor{}, ErrBreakGlassAuthenticationFailed
-	}
 	if len(request.Header.Values("Authorization")) != 0 {
 		return Actor{}, ErrAuthenticationConflict
 	}
@@ -361,8 +426,14 @@ func (service *BreakGlassService) Authenticate(request *http.Request) (Actor, er
 	if err != nil {
 		return Actor{}, ErrAuthenticationRequired
 	}
+	// Reload both live inputs for every presented emergency session so any
+	// effective credential-set or session-key change fails closed immediately.
+	state, err := service.loadState(request.Context())
+	if err != nil {
+		return Actor{}, ErrBreakGlassAuthenticationFailed
+	}
 	var payload sessionPayload
-	if err := service.cookies.decodeCurrent(request.Context(), "session", encoded, &payload); err != nil {
+	if err := state.cookies.decodeCurrent(request.Context(), "session", encoded, &payload); err != nil {
 		return Actor{}, ErrInvalidAuthentication
 	}
 	now := service.now().UTC()
@@ -374,6 +445,7 @@ func (service *BreakGlassService) Authenticate(request *http.Request) (Actor, er
 	}
 	payload.Actor.Method = payload.Method
 	actor, err := payload.Actor.Normalized()
+	actor.SessionExpiresAt = time.Unix(payload.ExpiresAt, 0).UTC()
 	if err != nil || actor.Method != MethodBreakGlass || len(actor.Roles) != 1 || actor.Roles[0] != RoleAdministrator || !constantTimeEqual(actor.Subject, state.config.BreakGlass.Username) {
 		return Actor{}, ErrInvalidAuthentication
 	}
@@ -403,7 +475,16 @@ func (service *BreakGlassService) loadState(ctx context.Context) (breakGlassStat
 	if err != nil {
 		return breakGlassState{}, errors.New("break-glass credential is invalid")
 	}
-	return breakGlassState{config: live, credential: credential, verifier: verifier, revision: breakGlassRevision(live.BreakGlass.Username, credential)}, nil
+	keyContents, err := service.secrets.Read(ctx, live.OIDC.SessionSecret)
+	if err != nil {
+		return breakGlassState{}, errors.New("break-glass session keys are unavailable")
+	}
+	defer clearBytes(keyContents)
+	keys, err := newKeyRingSource(service.secrets, live.OIDC.SessionSecret)
+	if err != nil {
+		return breakGlassState{}, errors.New("break-glass session keys are unavailable")
+	}
+	return breakGlassState{config: live, credential: credential, verifier: verifier, revision: breakGlassRevision(live, credential, keyContents), cookies: newCookieCodec(keys, service.now)}, nil
 }
 
 func (service *BreakGlassService) validSameOriginRequest(request *http.Request) error {
@@ -420,17 +501,49 @@ func (service *BreakGlassService) validSameOriginRequest(request *http.Request) 
 		return ErrBreakGlassAuthenticationFailed
 	}
 	public, err := url.Parse(live.PublicURL)
-	if err != nil || public.Host == "" || public.User != nil || public.Path != "" && public.Path != "/" || public.RawQuery != "" || public.Fragment != "" || !sameWebOrigin(origin, public) {
+	if err != nil || public.Host == "" || (strings.ToLower(public.Scheme) != "https" && !(strings.ToLower(public.Scheme) == "http" && isLoopbackHost(public.Hostname()))) || public.User != nil || public.Path != "" && public.Path != "/" || public.RawQuery != "" || public.Fragment != "" || !sameWebOrigin(origin, public) {
 		return ErrBreakGlassInvalidRequest
 	}
-	// An absolute request target carries an independently checkable origin.
-	// Relative server requests are intentionally checked by Origin only: TLS
-	// termination and trusted proxy normalization belong to the HTTP adapter,
-	// not this authentication seam.
-	if request.URL.IsAbs() && request.URL.Host != "" && !sameWebOrigin(&url.URL{Scheme: request.URL.Scheme, Host: request.URL.Host}, public) {
+	scheme := "http"
+	if request.TLS != nil {
+		scheme = "https"
+	}
+	host := request.Host
+	if service.requestFromTrustedProxy(request) {
+		proto := request.Header.Values("X-Forwarded-Proto")
+		forwardedHost := request.Header.Values("X-Forwarded-Host")
+		if len(proto) != 1 || len(forwardedHost) != 1 || strings.Contains(proto[0], ",") || strings.Contains(forwardedHost[0], ",") {
+			return ErrBreakGlassInvalidRequest
+		}
+		scheme = strings.ToLower(strings.TrimSpace(proto[0]))
+		host = strings.TrimSpace(forwardedHost[0])
+	} else if len(request.Header.Values("X-Forwarded-Proto")) != 0 || len(request.Header.Values("X-Forwarded-Host")) != 0 {
+		return ErrBreakGlassInvalidRequest
+	}
+	if request.URL.IsAbs() && !sameWebOrigin(&url.URL{Scheme: request.URL.Scheme, Host: request.URL.Host}, public) {
+		return ErrBreakGlassInvalidRequest
+	}
+	if !sameWebOrigin(&url.URL{Scheme: scheme, Host: host}, public) {
 		return ErrBreakGlassInvalidRequest
 	}
 	return nil
+}
+
+func (service *BreakGlassService) requestFromTrustedProxy(request *http.Request) bool {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		host = request.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, network := range service.trustedProxies {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseStrictOrigin(raw string) (*url.URL, error) {
@@ -443,53 +556,62 @@ func parseStrictOrigin(raw string) (*url.URL, error) {
 
 func decodeBreakGlassLoginInput(request *http.Request) (BreakGlassLoginRequest, error) {
 	if request.ContentLength > BreakGlassLoginBodyMaxBytes {
-		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+		return BreakGlassLoginRequest{}, ErrBreakGlassRequestTooLarge
 	}
 	if request.Body == nil {
 		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, BreakGlassLoginBodyMaxBytes+1))
+	defer clearBytes(body)
 	if err != nil || len(body) > BreakGlassLoginBodyMaxBytes {
-		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+		return BreakGlassLoginRequest{}, ErrBreakGlassRequestTooLarge
 	}
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil {
 		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
 	}
-	switch mediaType {
-	case "application/json":
-		var input BreakGlassLoginRequest
-		decoder := json.NewDecoder(strings.NewReader(string(body)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&input); err != nil {
-			return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
-		}
-		var extra any
-		if err := decoder.Decode(&extra); err != io.EOF {
-			return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
-		}
-		if len(input.Username) > 128 || len(input.Password) > BreakGlassPasswordMaxBytes {
-			return BreakGlassLoginRequest{}, ErrBreakGlassAuthenticationFailed
-		}
-		return input, nil
-	case "application/x-www-form-urlencoded":
-		values, err := url.ParseQuery(string(body))
-		if err != nil || len(values) != 2 || len(values["username"]) != 1 || len(values["password"]) != 1 {
-			return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
-		}
-		for key := range values {
-			if key != "username" && key != "password" {
-				return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
-			}
-		}
-		input := BreakGlassLoginRequest{Username: values.Get("username"), Password: values.Get("password")}
-		if len(input.Username) > 128 || len(input.Password) > BreakGlassPasswordMaxBytes {
-			return BreakGlassLoginRequest{}, ErrBreakGlassAuthenticationFailed
-		}
-		return input, nil
-	default:
+	if mediaType != "application/json" {
+		return BreakGlassLoginRequest{}, ErrBreakGlassUnsupportedMediaType
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	first, err := decoder.Token()
+	if err != nil || first != json.Delim('{') {
 		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
 	}
+	values := map[string]json.RawMessage{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+		}
+		key, ok := token.(string)
+		if !ok || values[key] != nil || (key != "username" && key != "password") {
+			return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil || string(raw) == "null" {
+			return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+		}
+		values[key] = raw
+	}
+	last, err := decoder.Token()
+	if err != nil || last != json.Delim('}') {
+		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+	}
+	if len(values) != 2 {
+		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+	}
+	var input BreakGlassLoginRequest
+	if json.Unmarshal(values["username"], &input.Username) != nil || json.Unmarshal(values["password"], &input.Password) != nil {
+		return BreakGlassLoginRequest{}, ErrBreakGlassInvalidRequest
+	}
+	if len(input.Username) > 128 || len(input.Password) > BreakGlassPasswordMaxBytes {
+		return BreakGlassLoginRequest{}, ErrBreakGlassAuthenticationFailed
+	}
+	return input, nil
 }
 
 func parseBreakGlassCredential(contents []byte) (BreakGlassCredential, breakGlassVerifier, error) {
@@ -564,33 +686,17 @@ func parseBreakGlassVerifier(raw string) (breakGlassVerifier, error) {
 }
 
 func decodePHCPart(raw string, size int) ([]byte, error) {
-	encodedLength := base64.RawStdEncoding.EncodedLen(size)
-	if len(raw) != encodedLength {
+	if len(raw) != base64.RawStdEncoding.EncodedLen(size) {
 		return nil, errors.New("PHC base64 is invalid")
 	}
-	// Argon2's PHC alphabet is ./0-9A-Za-z, rather than the standard
-	// base64 alphabet. Convert its six-bit indices to the Go decoder's
-	// alphabet and reject all other spellings (including padding and URL-safe
-	// characters).
-	const phcAlphabet = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	const stdAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	var converted strings.Builder
-	converted.Grow(len(raw))
-	for _, char := range raw {
-		index := strings.IndexRune(phcAlphabet, char)
-		if index < 0 {
-			return nil, errors.New("PHC base64 is invalid")
-		}
-		converted.WriteByte(stdAlphabet[index])
-	}
-	decoded, err := base64.RawStdEncoding.Strict().DecodeString(converted.String())
-	if err != nil || len(decoded) != size {
+	decoded, err := base64.RawStdEncoding.Strict().DecodeString(raw)
+	if err != nil || len(decoded) != size || base64.RawStdEncoding.EncodeToString(decoded) != raw {
 		return nil, errors.New("PHC base64 is invalid")
 	}
 	return decoded, nil
 }
 
-func breakGlassRevision(username string, credential BreakGlassCredential) string {
+func breakGlassRevision(cfg *config.ServerConfig, credential BreakGlassCredential, sessionKeys []byte) string {
 	hash := sha256.New()
 	hash.Write([]byte(breakGlassRevisionHeader))
 	writeRevisionPart := func(value []byte) {
@@ -599,10 +705,14 @@ func breakGlassRevision(username string, credential BreakGlassCredential) string
 		hash.Write(length[:])
 		hash.Write(value)
 	}
-	writeRevisionPart([]byte(username))
+	writeRevisionPart([]byte(cfg.BreakGlass.Username))
 	writeRevisionPart([]byte(credential.Verifier))
 	writeRevisionPart([]byte(credential.Generation))
 	hash.Write([]byte{1})
+	for _, value := range []string{cfg.BreakGlass.CredentialSecret.Namespace, cfg.BreakGlass.CredentialSecret.Name, cfg.BreakGlass.CredentialSecret.Key, cfg.OIDC.SessionSecret.Namespace, cfg.OIDC.SessionSecret.Name, cfg.OIDC.SessionSecret.Key} {
+		writeRevisionPart([]byte(value))
+	}
+	writeRevisionPart(sessionKeys)
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
@@ -631,9 +741,18 @@ func clearBytes(value []byte) {
 	}
 }
 
-func requestSource(request *http.Request) string {
+func (service *BreakGlassService) requestSource(request *http.Request) string {
 	if request == nil {
 		return "unknown"
+	}
+	if service.requestFromTrustedProxy(request) {
+		values := request.Header.Values("X-Forwarded-For")
+		if len(values) == 1 && !strings.Contains(values[0], ",") {
+			candidate := strings.TrimSpace(values[0])
+			if ip := net.ParseIP(candidate); ip != nil {
+				return ip.String()
+			}
+		}
 	}
 	value := request.RemoteAddr
 	if host, _, err := net.SplitHostPort(value); err == nil {

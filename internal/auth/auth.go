@@ -54,10 +54,11 @@ const (
 )
 
 type Actor struct {
-	Subject     string `json:"subject"`
-	DisplayName string `json:"displayName,omitempty"`
-	Roles       []Role `json:"roles"`
-	Method      Method `json:"-"`
+	Subject          string    `json:"subject"`
+	DisplayName      string    `json:"displayName,omitempty"`
+	Roles            []Role    `json:"roles"`
+	Method           Method    `json:"-"`
+	SessionExpiresAt time.Time `json:"-"`
 }
 
 func (actor Actor) Normalized() (Actor, error) {

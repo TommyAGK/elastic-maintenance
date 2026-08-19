@@ -8,12 +8,12 @@ import (
 
 func TestEmbeddedOperatorInterfaceIsSelfContainedAndReadOnly(t *testing.T) {
 	index := string(Index())
-	for _, required := range []string{"/assets/app.css", "/assets/app.js", "External GitOps owns desired state", "data-view=\"sources\"", "data-view=\"targets\"", "data-view=\"validations\""} {
+	for _, required := range []string{"/assets/app.css", "/assets/app.js", "External GitOps owns desired state", "data-view=\"sources\"", "data-view=\"targets\"", "data-view=\"validations\"", "Emergency local access", "break-glass-banner"} {
 		if !strings.Contains(index, required) {
 			t.Errorf("index does not contain %q", required)
 		}
 	}
-	for _, forbidden := range []string{"https://", "http://", "contenteditable", "resource-edit", "credential"} {
+	for _, forbidden := range []string{"https://", "http://", "contenteditable", "resource-edit"} {
 		if strings.Contains(strings.ToLower(index), forbidden) {
 			t.Errorf("index contains forbidden %q", forbidden)
 		}
@@ -22,7 +22,7 @@ func TestEmbeddedOperatorInterfaceIsSelfContainedAndReadOnly(t *testing.T) {
 	if !ok || javascript.ContentType != "text/javascript; charset=utf-8" {
 		t.Fatalf("JavaScript asset = %#v, %v", javascript, ok)
 	}
-	for _, required := range [][]byte{[]byte("/api/v1/session"), []byte("/api/v1/sources"), []byte("/api/v1/targets"), []byte("/api/v1/validations"), []byte("method:\"POST\""), []byte("Idempotency-Key"), []byte("/auth/logout"), []byte("authenticationMethod")} {
+	for _, required := range [][]byte{[]byte("/api/v1/session"), []byte("/api/v1/sources"), []byte("/api/v1/targets"), []byte("/api/v1/validations"), []byte("method:\"POST\""), []byte("Idempotency-Key"), []byte("/auth/logout"), []byte("authenticationMethod"), []byte("/auth/break-glass/login"), []byte("password.value=\"\"")} {
 		if !bytes.Contains(javascript.Content, required) {
 			t.Errorf("JavaScript does not contain %q", required)
 		}

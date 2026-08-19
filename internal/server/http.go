@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/TommyAGK/elastic-maintenance/internal/api"
+	"github.com/TommyAGK/elastic-maintenance/internal/audit"
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
@@ -46,6 +47,10 @@ type ValidationBackend interface {
 	CurrentSnapshot(context.Context) (*manifest.SourceSnapshot, error)
 }
 
+type BreakGlassAuthenticator interface {
+	Login(http.ResponseWriter, *http.Request) error
+}
+
 type BrowserAuthenticator interface {
 	BeginLogin(http.ResponseWriter, *http.Request) error
 	CompleteCallback(http.ResponseWriter, *http.Request) error
@@ -58,6 +63,8 @@ type HandlerOptions struct {
 	Authenticator     auth.Authenticator
 	Authorizer        auth.Authorizer
 	BrowserAuth       BrowserAuthenticator
+	LogoutAuth        BrowserAuthenticator
+	BreakGlassAuth    BreakGlassAuthenticator
 	ValidationBackend ValidationBackend
 }
 
@@ -98,17 +105,54 @@ func newHTTPRuntime(
 		return nil, fmt.Errorf("listen on configured address: %w", err)
 	}
 
-	var browserAuth *auth.BrowserOIDC
-	if cfg.OIDC.Enabled {
+	var browserAuth BrowserAuthenticator
+	var logoutAuth BrowserAuthenticator
+	var oidcAuth *auth.BrowserOIDC
+	var breakGlassAuth *auth.BreakGlassService
+	var authenticators []auth.Authenticator
+	if cfg.OIDC.Enabled || cfg.BreakGlass.Enabled {
 		secretReader, secretErr := secretmount.NewMountedReader(cfg.OIDC.SecretMountRoot, secretmount.DefaultMaxBytes)
 		if secretErr != nil {
 			listener.Close()
-			return nil, fmt.Errorf("open OIDC secret mounts: %w", secretErr)
+			return nil, fmt.Errorf("open authentication secret mounts: %w", secretErr)
 		}
-		browserAuth, err = auth.NewBrowserOIDC(auth.BrowserOIDCOptions{OIDC: cfg.OIDC, Authorization: cfg.Authorization, Secrets: secretReader, TrustedProxies: cfg.TrustedProxies})
-		if err != nil {
-			listener.Close()
-			return nil, fmt.Errorf("initialize browser authentication: %w", err)
+		if cfg.OIDC.Enabled {
+			oidcAuth, err = auth.NewBrowserOIDC(auth.BrowserOIDCOptions{OIDC: cfg.OIDC, Authorization: cfg.Authorization, Secrets: secretReader, TrustedProxies: cfg.TrustedProxies})
+			if err != nil {
+				listener.Close()
+				return nil, fmt.Errorf("initialize OIDC authentication: %w", err)
+			}
+			browserAuth = oidcAuth
+			logoutAuth = oidcAuth
+			authenticators = append(authenticators, oidcAuth)
+		}
+		if cfg.BreakGlass.Enabled {
+			recorder := audit.LogRecorder{Logger: logger}
+			liveConfig := auth.BreakGlassConfigSourceFunc(func(ctx context.Context) (*config.ServerConfig, error) {
+				live, loadErr := config.LoadServerConfig(cfg.RuntimeConfigPath())
+				if loadErr != nil {
+					return nil, loadErr
+				}
+				overrides := cfg.StartupOverrides()
+				if overrides.PublicURLOverride != "" {
+					live.PublicURL = overrides.PublicURLOverride
+				}
+				return live, nil
+			})
+			breakGlassAuth, err = auth.NewBreakGlass(auth.BreakGlassOptions{ConfigSource: liveConfig, Secrets: secretReader, TrustedProxies: cfg.TrustedProxies, Audit: func(ctx context.Context, event auth.BreakGlassAuditEvent) error {
+				outcome := audit.Outcome(event.Outcome)
+				action := audit.ActionBreakGlassLogin
+				if event.Action == "logout" {
+					action = audit.ActionLogout
+				}
+				return recorder.Record(ctx, audit.Event{OccurredAt: time.Now().UTC(), Actor: event.Actor, RequestID: RequestID(ctx), Action: action, Outcome: outcome, ReasonCode: event.ReasonCode})
+			}})
+			if err != nil {
+				listener.Close()
+				return nil, fmt.Errorf("initialize break-glass authentication: %w", err)
+			}
+			authenticators = append(authenticators, breakGlassAuth)
+			logoutAuth = breakGlassAuth
 		}
 	}
 
@@ -121,9 +165,9 @@ func newHTTPRuntime(
 		return nil, fmt.Errorf("create validation service: %w", err)
 	}
 	runtime := &HTTPRuntime{listener: listener, validation: validationService, build: build.Normalized()}
-	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth}
-	if browserAuth != nil {
-		handlerOptions.Authenticator = browserAuth
+	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth}
+	if len(authenticators) != 0 {
+		handlerOptions.Authenticator = auth.NewCompositeAuthenticator(authenticators...)
 	}
 	handler := NewHandler(handlerOptions)
 	runtime.server = &http.Server{
@@ -218,7 +262,12 @@ func NewHandler(options HandlerOptions) http.Handler {
 	})
 	mux.Handle("/auth/login", browserLoginHandler(options.BrowserAuth))
 	mux.Handle("/auth/callback", browserCallbackHandler(options.BrowserAuth))
-	mux.Handle("/auth/logout", authenticate(authenticator, browserLogoutHandler(options.BrowserAuth)))
+	logoutAuth := options.LogoutAuth
+	if logoutAuth == nil {
+		logoutAuth = options.BrowserAuth
+	}
+	mux.Handle("/auth/logout", authenticate(authenticator, browserLogoutHandler(logoutAuth)))
+	mux.Handle("/auth/break-glass/login", breakGlassLoginHandler(options.BreakGlassAuth))
 	mux.HandleFunc("/assets/", serveWebAsset)
 
 	protectedMux := http.NewServeMux()
@@ -305,9 +354,12 @@ func sessionHandler(w http.ResponseWriter, request *http.Request) {
 		api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
 		return
 	}
-	api.WriteJSON(w, request, http.StatusOK, api.SessionResponse{
-		APIVersion: api.Version, Authenticated: true, AuthenticationMethod: actor.Method, Actor: actor,
-	})
+	response := api.SessionResponse{APIVersion: api.Version, Authenticated: true, AuthenticationMethod: actor.Method, Actor: actor}
+	if !actor.SessionExpiresAt.IsZero() {
+		expires := actor.SessionExpiresAt
+		response.ExpiresAt = &expires
+	}
+	api.WriteJSON(w, request, http.StatusOK, response)
 }
 
 func protectedNotFound(w http.ResponseWriter, request *http.Request) {
@@ -447,6 +499,41 @@ func authorize(authorizer auth.Authorizer, permission auth.Permission, next http
 			return
 		}
 		next.ServeHTTP(w, request)
+	})
+}
+
+func breakGlassLoginHandler(service BreakGlassAuthenticator) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !allowMethods(w, request, http.MethodPost) {
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		if service == nil {
+			api.WriteError(w, request, http.StatusServiceUnavailable, "break_glass_unavailable", "emergency authentication is unavailable", RequestID(request.Context()))
+			return
+		}
+		err := service.Login(w, request)
+		if err == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		switch {
+		case errors.Is(err, auth.ErrAuthenticationConflict):
+			api.WriteError(w, request, http.StatusConflict, "authentication_conflict", "multiple authentication identities are not allowed", RequestID(request.Context()))
+		case errors.Is(err, auth.ErrBreakGlassRequestTooLarge):
+			api.WriteError(w, request, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the limit", RequestID(request.Context()))
+		case errors.Is(err, auth.ErrBreakGlassUnsupportedMediaType):
+			api.WriteError(w, request, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json", RequestID(request.Context()))
+		case errors.Is(err, auth.ErrBreakGlassUnavailable), errors.Is(err, auth.ErrBreakGlassDisabled):
+			api.WriteError(w, request, http.StatusServiceUnavailable, "break_glass_unavailable", "emergency authentication is unavailable", RequestID(request.Context()))
+		case errors.Is(err, auth.ErrBreakGlassThrottled):
+			w.Header().Set("Retry-After", "30")
+			api.WriteError(w, request, http.StatusTooManyRequests, "authentication_throttled", "authentication is temporarily unavailable", RequestID(request.Context()))
+		case errors.Is(err, auth.ErrBreakGlassInvalidRequest), errors.Is(err, auth.ErrBreakGlassMethodNotAllowed):
+			api.WriteError(w, request, http.StatusBadRequest, "invalid_authentication_request", "authentication request is invalid", RequestID(request.Context()))
+		default:
+			api.WriteError(w, request, http.StatusUnauthorized, "authentication_failed", "authentication failed", RequestID(request.Context()))
+		}
 	})
 }
 

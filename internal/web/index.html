@@ -36,12 +36,13 @@
 
     <main id="main" tabindex="-1">
       <section id="auth-state" class="notice hidden" aria-live="assertive">
-        <div><p class="eyebrow">Authentication required</p><h1>Sign in to inspect desired state</h1><p>The operator interface uses the same protected API as automation clients.</p></div>
-        <a class="button" href="/auth/login">Sign in with OIDC</a>
+        <div><p class="eyebrow">Authentication required</p><h1>Sign in to inspect desired state</h1><p>The operator interface uses the same protected API as automation clients.</p><a class="button" href="/auth/login">Sign in with OIDC</a></div>
+        <form id="break-glass-login" class="emergency-login" autocomplete="off"><p class="eyebrow">Emergency local access</p><strong>IdP outage only</strong><p>Use the audited vault credential. Every use requires immediate credential rotation.</p><label>Username<input id="break-glass-username" name="username" maxlength="128" required autocomplete="off"></label><label>Password<input id="break-glass-password" name="password" type="password" maxlength="1024" required autocomplete="off"></label><button class="secondary" type="submit">Use break-glass access</button><p id="break-glass-error" class="form-error hidden" role="alert"></p></form>
       </section>
       <section id="error-state" class="notice error hidden" role="alert"></section>
 
       <div id="workspace" class="hidden">
+        <section id="break-glass-banner" class="emergency-banner hidden" role="alert"><strong>Break-glass administrator session active</strong><span id="break-glass-expiry"></span><span>Rotate the vault password and mounted verifier/generation immediately after use.</span></section>
         <section class="view" data-view="sources" aria-labelledby="sources-title">
           <div class="page-heading">
             <div><p class="eyebrow">Mounted inputs</p><h1 id="sources-title">Source sets</h1><p>Canonical metadata from authoritative, read-only mounts.</p></div>

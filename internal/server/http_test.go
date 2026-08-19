@@ -21,7 +21,18 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 	"github.com/TommyAGK/elastic-maintenance/internal/auth/authtest"
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
+	"golang.org/x/crypto/argon2"
 )
+
+type serverMappedSecrets map[string][]byte
+
+func (secrets serverMappedSecrets) Read(_ context.Context, ref config.SecretKeyRef) ([]byte, error) {
+	value, ok := secrets[ref.Key]
+	if !ok {
+		return nil, errors.New("missing")
+	}
+	return append([]byte{}, value...), nil
+}
 
 type serverSessionSecrets struct{ contents []byte }
 
@@ -39,6 +50,48 @@ func (conflictBrowserAuth) CompleteCallback(http.ResponseWriter, *http.Request) 
 }
 func (conflictBrowserAuth) Logout(http.ResponseWriter, *http.Request) error {
 	return auth.ErrAuthenticationConflict
+}
+
+func TestBreakGlassLoginWorksWithoutOIDCAndIsAudited(t *testing.T) {
+	key := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+	salt := bytes.Repeat([]byte{7}, 16)
+	password := "vault-only-sentinel-password"
+	hash := argon2.IDKey([]byte(password), salt, 3, 65536, 1, 32)
+	generation := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{5}, 16))
+	credential := []byte("elastic-maintainer-break-glass/v1\ngeneration " + generation + "\nverifier $argon2id$v=19$m=65536,t=3,p=1$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash) + "\n")
+	cfg := &config.ServerConfig{PublicURL: "https://app.example.test", OIDC: config.OIDCConfig{SecretMountRoot: "/secrets", SessionSecret: config.SecretKeyRef{Namespace: "ns", Name: "session", Key: "keys"}}, BreakGlass: config.BreakGlassConfig{Enabled: true, Username: "break-glass-admin", CredentialSecret: config.SecretKeyRef{Namespace: "ns", Name: "break-glass", Key: "credential"}}}
+	var events []auth.BreakGlassAuditEvent
+	service, err := auth.NewBreakGlass(auth.BreakGlassOptions{Config: cfg, Secrets: serverMappedSecrets{"keys": []byte("elastic-maintainer-session-keyring/v1\ncurrent active " + key + "\n"), "credential": credential}, Audit: func(_ context.Context, event auth.BreakGlassAuditEvent) error {
+		events = append(events, event)
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oidcService, err := auth.NewBrowserOIDC(auth.BrowserOIDCOptions{OIDC: config.OIDCConfig{Enabled: true, IssuerURL: "https://unreachable-idp.invalid", EndpointOrigins: []string{"https://unreachable-idp.invalid"}, ClientID: "client", ClientSecret: config.SecretKeyRef{Key: "client"}, SessionSecret: cfg.OIDC.SessionSecret, RedirectURL: "https://app.example.test/auth/callback", Scopes: []string{"openid"}}, Secrets: serverMappedSecrets{"keys": []byte("elastic-maintainer-session-keyring/v1\ncurrent active " + key + "\n")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(HandlerOptions{Authenticator: auth.NewCompositeAuthenticator(oidcService, service), BrowserAuth: oidcService, BreakGlassAuth: service, LogoutAuth: service})
+	login := httptest.NewRequest(http.MethodPost, "https://app.example.test/auth/break-glass/login", strings.NewReader(`{"username":"break-glass-admin","password":"`+password+`"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("Origin", "https://app.example.test")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, login)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("login status=%d body=%s", response.Code, response.Body.String())
+	}
+	session := response.Result().Cookies()[0]
+	inspect := httptest.NewRequest(http.MethodGet, "https://app.example.test/api/v1/session", nil)
+	inspect.AddCookie(session)
+	inspected := httptest.NewRecorder()
+	handler.ServeHTTP(inspected, inspect)
+	if inspected.Code != http.StatusOK || !strings.Contains(inspected.Body.String(), `"authenticationMethod":"break-glass"`) || !strings.Contains(inspected.Body.String(), `"expiresAt"`) {
+		t.Fatalf("session status=%d body=%s", inspected.Code, inspected.Body.String())
+	}
+	if strings.Contains(inspected.Body.String(), password) || len(events) != 1 || events[0].Outcome != "succeeded" {
+		t.Fatalf("unsafe response or audit events=%#v", events)
+	}
 }
 
 func TestBrowserCallbackConflictReturnsDocumentedStatus(t *testing.T) {

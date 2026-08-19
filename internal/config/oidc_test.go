@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -77,6 +79,21 @@ func TestBreakGlassConfigRequiresOneCanonicalCredentialReference(t *testing.T) {
 				t.Fatalf("ValidateBreakGlass() error=%v", err)
 			}
 		})
+	}
+}
+
+func TestBreakGlassConfigurationRejectsPlaintextCredentialFields(t *testing.T) {
+	contents, err := os.ReadFile("testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "server.yaml")
+	contents = append(contents, []byte("\nbreakGlass:\n  enabled: true\n  username: break-glass-admin\n  password: forbidden\n  credentialSecret:\n    namespace: elastic-maintainer\n    name: elastic-maintainer-break-glass\n    key: credential\n")...)
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadServerConfig(path); err == nil || !strings.Contains(err.Error(), "password") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

@@ -810,6 +810,48 @@
           }
         }
       }
+    },
+    "/auth/break-glass/login": {
+      "post": {
+        "operationId": "breakGlassLogin",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BreakGlassLoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Emergency local administrator session established"
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "413": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "415": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "429": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1128,6 +1170,10 @@
               "bearer",
               "break-glass"
             ]
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -2042,6 +2088,27 @@
           },
           "nextTargetPageToken": {
             "type": "string"
+          }
+        }
+      },
+      "BreakGlassLoginRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "writeOnly": true
           }
         }
       }
