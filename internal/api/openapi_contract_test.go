@@ -93,7 +93,7 @@ func TestOpenAPIUnfinishedRoutesAreExplicit(t *testing.T) {
 	document := openAPITestDocument(t)
 	paths := objectAt(t, document, "paths")
 	implemented := map[string]bool{
-		"GET /health/live": true, "GET /health/ready": true, "GET /api/v1/openapi.json": true, "GET /api/v1/session": true,
+		"GET /health/live": true, "GET /health/ready": true, "GET /auth/login": true, "GET /auth/callback": true, "POST /auth/logout": true, "GET /api/v1/openapi.json": true, "GET /api/v1/session": true,
 		"GET /api/v1/sources": true, "GET /api/v1/sources/{sourceId}": true,
 		"GET /api/v1/targets": true, "GET /api/v1/targets/{targetId}": true,
 		"GET /api/v1/validations": true, "POST /api/v1/validations": true, "GET /api/v1/validations/{jobId}": true,

@@ -120,12 +120,17 @@ async function openValidation(id){
   }catch(error){showError(error);}
 }
 
+async function logout(){
+  const button=$("#logout");button.disabled=true;
+  try{await api("/auth/logout",{method:"POST"});location.assign("/");}catch(error){button.disabled=false;showError(error);}
+}
+
 async function boot(){
   window.addEventListener("hashchange",()=>activateView(location.hash.slice(1)));
   document.querySelectorAll("[data-refresh]").forEach((button)=>button.addEventListener("click",()=>button.dataset.refresh==="sources"?loadSources():loadTargets()));
-  $("#sources-more").addEventListener("click",()=>loadSources(true));$("#targets-more").addEventListener("click",()=>loadTargets(true));$("#validations-more").addEventListener("click",()=>loadValidations(true));$("#start-validation").addEventListener("click",startValidation);
+  $("#sources-more").addEventListener("click",()=>loadSources(true));$("#targets-more").addEventListener("click",()=>loadTargets(true));$("#validations-more").addEventListener("click",()=>loadValidations(true));$("#start-validation").addEventListener("click",startValidation);$("#logout").addEventListener("click",logout);
   try{state.session=await api("/api/v1/session");}catch(error){if(error.status===401){$("#auth-state").classList.remove("hidden");$("#identity").textContent="Not signed in";return;}showError(error);return;}
-  const actor=state.session.actor,roles=actor.roles||[];$("#identity").replaceChildren(node("span",{class:"status-dot"}),document.createTextNode(`${actor.displayName||actor.subject} · ${roles.join(", ")||"no role"}`));
+  const actor=state.session.actor,roles=actor.roles||[],method=state.session.authenticationMethod||"session";$("#identity").replaceChildren(node("span",{class:"status-dot"}),document.createTextNode(`${actor.displayName||actor.subject} · ${roles.join(", ")||"no role"} · ${method}`));$("#logout").classList.remove("hidden");
   const canValidate=roles.includes("planner")||roles.includes("administrator");$("#start-validation").classList.toggle("hidden",!canValidate);$("#validation-permission").classList.toggle("hidden",canValidate);$("#workspace").classList.remove("hidden");activateView(location.hash.slice(1)||location.pathname.slice(1));await Promise.all([loadSources(),loadTargets(),loadValidations()]);
 }
 

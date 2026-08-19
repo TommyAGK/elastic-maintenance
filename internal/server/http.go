@@ -22,6 +22,7 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
 	"github.com/TommyAGK/elastic-maintenance/internal/manifest"
+	"github.com/TommyAGK/elastic-maintenance/internal/secretmount"
 	"github.com/TommyAGK/elastic-maintenance/internal/validation"
 	webui "github.com/TommyAGK/elastic-maintenance/internal/web"
 )
@@ -45,11 +46,18 @@ type ValidationBackend interface {
 	CurrentSnapshot(context.Context) (*manifest.SourceSnapshot, error)
 }
 
+type BrowserAuthenticator interface {
+	BeginLogin(http.ResponseWriter, *http.Request) error
+	CompleteCallback(http.ResponseWriter, *http.Request) error
+	Logout(http.ResponseWriter, *http.Request) error
+}
+
 type HandlerOptions struct {
 	Logger            *slog.Logger
 	IsReady           func() bool
 	Authenticator     auth.Authenticator
 	Authorizer        auth.Authorizer
+	BrowserAuth       BrowserAuthenticator
 	ValidationBackend ValidationBackend
 }
 
@@ -90,6 +98,20 @@ func newHTTPRuntime(
 		return nil, fmt.Errorf("listen on configured address: %w", err)
 	}
 
+	var browserAuth *auth.BrowserOIDC
+	if cfg.OIDC.Enabled {
+		secretReader, secretErr := secretmount.NewMountedReader(cfg.OIDC.SecretMountRoot, secretmount.DefaultMaxBytes)
+		if secretErr != nil {
+			listener.Close()
+			return nil, fmt.Errorf("open OIDC secret mounts: %w", secretErr)
+		}
+		browserAuth, err = auth.NewBrowserOIDC(auth.BrowserOIDCOptions{OIDC: cfg.OIDC, Authorization: cfg.Authorization, Secrets: secretReader, TrustedProxies: cfg.TrustedProxies})
+		if err != nil {
+			listener.Close()
+			return nil, fmt.Errorf("initialize browser authentication: %w", err)
+		}
+	}
+
 	validationService, err := validation.NewService(validation.Options{
 		Inputs:     validation.MountedInputReader{ConfigPath: cfg.RuntimeConfigPath(), Overrides: cfg.StartupOverrides()},
 		Repository: validation.NewMemoryRepository(), Workers: 1, QueueCapacity: 32,
@@ -99,9 +121,11 @@ func newHTTPRuntime(
 		return nil, fmt.Errorf("create validation service: %w", err)
 	}
 	runtime := &HTTPRuntime{listener: listener, validation: validationService, build: build.Normalized()}
-	handler := NewHandler(HandlerOptions{
-		Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService,
-	})
+	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth}
+	if browserAuth != nil {
+		handlerOptions.Authenticator = browserAuth
+	}
+	handler := NewHandler(handlerOptions)
 	runtime.server = &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -192,9 +216,9 @@ func NewHandler(options HandlerOptions) http.Handler {
 			_, _ = w.Write(api.OpenAPIDocument())
 		}
 	})
-	mux.HandleFunc("/auth/login", notImplementedAuth(http.MethodGet))
-	mux.HandleFunc("/auth/callback", notImplementedAuth(http.MethodGet))
-	mux.HandleFunc("/auth/logout", notImplementedAuth(http.MethodPost))
+	mux.Handle("/auth/login", browserLoginHandler(options.BrowserAuth))
+	mux.Handle("/auth/callback", browserCallbackHandler(options.BrowserAuth))
+	mux.Handle("/auth/logout", authenticate(authenticator, browserLogoutHandler(options.BrowserAuth)))
 	mux.HandleFunc("/assets/", serveWebAsset)
 
 	protectedMux := http.NewServeMux()
@@ -282,9 +306,7 @@ func sessionHandler(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	api.WriteJSON(w, request, http.StatusOK, api.SessionResponse{
-		APIVersion:    api.Version,
-		Authenticated: true,
-		Actor:         actor,
+		APIVersion: api.Version, Authenticated: true, AuthenticationMethod: actor.Method, Actor: actor,
 	})
 }
 
@@ -396,6 +418,10 @@ func planSubresourceHandler(authorizer auth.Authorizer) http.Handler {
 func authenticate(authenticator auth.Authenticator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		actor, err := authenticator.Authenticate(request)
+		if errors.Is(err, auth.ErrAuthenticationConflict) {
+			api.WriteError(w, request, http.StatusConflict, "authentication_conflict", "multiple authentication identities are not allowed", RequestID(request.Context()))
+			return
+		}
 		if err != nil {
 			api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
 			return
@@ -422,6 +448,63 @@ func authorize(authorizer auth.Authorizer, permission auth.Permission, next http
 		}
 		next.ServeHTTP(w, request)
 	})
+}
+
+func browserLoginHandler(browser BrowserAuthenticator) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !allowMethods(w, request, http.MethodGet) {
+			return
+		}
+		if browser == nil {
+			api.WriteError(w, request, http.StatusServiceUnavailable, "oidc_unavailable", "OIDC authentication is unavailable", RequestID(request.Context()))
+			return
+		}
+		if err := browser.BeginLogin(w, request); err != nil {
+			writeBrowserAuthError(w, request, err)
+		}
+	})
+}
+func browserCallbackHandler(browser BrowserAuthenticator) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !allowMethods(w, request, http.MethodGet) {
+			return
+		}
+		if browser == nil {
+			api.WriteError(w, request, http.StatusServiceUnavailable, "oidc_unavailable", "OIDC authentication is unavailable", RequestID(request.Context()))
+			return
+		}
+		if err := browser.CompleteCallback(w, request); err != nil {
+			writeBrowserAuthError(w, request, err)
+		}
+	})
+}
+func browserLogoutHandler(browser BrowserAuthenticator) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !allowMethods(w, request, http.MethodPost) {
+			return
+		}
+		if browser == nil {
+			api.WriteError(w, request, http.StatusServiceUnavailable, "oidc_unavailable", "OIDC authentication is unavailable", RequestID(request.Context()))
+			return
+		}
+		if err := browser.Logout(w, request); err != nil {
+			if errors.Is(err, auth.ErrInvalidAuthentication) {
+				api.WriteError(w, request, http.StatusBadRequest, "invalid_logout", "logout request is invalid", RequestID(request.Context()))
+				return
+			}
+			writeBrowserAuthError(w, request, err)
+		}
+	})
+}
+func writeBrowserAuthError(w http.ResponseWriter, request *http.Request, err error) {
+	switch {
+	case errors.Is(err, auth.ErrOIDCUnavailable), errors.Is(err, auth.ErrOIDCDisabled):
+		api.WriteError(w, request, http.StatusServiceUnavailable, "oidc_unavailable", "OIDC authentication is unavailable", RequestID(request.Context()))
+	case errors.Is(err, auth.ErrAuthenticationConflict):
+		api.WriteError(w, request, http.StatusConflict, "authentication_conflict", "multiple authentication identities are not allowed", RequestID(request.Context()))
+	default:
+		api.WriteError(w, request, http.StatusUnauthorized, "authentication_failed", "authentication failed", RequestID(request.Context()))
+	}
 }
 
 func notImplementedAuth(method string) http.HandlerFunc {

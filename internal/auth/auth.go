@@ -47,8 +47,10 @@ const (
 type Method string
 
 const (
-	MethodSession Method = "session"
-	MethodBearer  Method = "bearer"
+	MethodSession    Method = "session"
+	MethodOIDC       Method = "oidc"
+	MethodBearer     Method = "bearer"
+	MethodBreakGlass Method = "break-glass"
 )
 
 type Actor struct {
@@ -64,7 +66,7 @@ func (actor Actor) Normalized() (Actor, error) {
 	if actor.Subject == "" {
 		return Actor{}, ErrInvalidAuthentication
 	}
-	if actor.Method != MethodSession && actor.Method != MethodBearer {
+	if actor.Method != MethodSession && actor.Method != MethodOIDC && actor.Method != MethodBearer && actor.Method != MethodBreakGlass {
 		return Actor{}, ErrInvalidAuthentication
 	}
 

@@ -10,6 +10,8 @@ corsAllowedOrigins:
 mountRoots:
   - /var/lib/elastic-maintainer/sources
 oidc:
+  enabled: true
+  secretMountRoot: /var/run/secrets/elastic-maintainer
   issuerURL: https://identity.example.test
   clientID: elastic-maintainer
   clientSecret:
@@ -24,6 +26,8 @@ oidc:
   scopes:
     - openid
     - profile
+  endpointOrigins:
+    - https://identity.example.test
   subjectClaim: sub
   displayNameClaim: name
 authorization:

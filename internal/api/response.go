@@ -21,9 +21,10 @@ type APIError struct {
 }
 
 type SessionResponse struct {
-	APIVersion    string     `json:"apiVersion"`
-	Authenticated bool       `json:"authenticated"`
-	Actor         auth.Actor `json:"actor"`
+	APIVersion           string      `json:"apiVersion"`
+	Authenticated        bool        `json:"authenticated"`
+	AuthenticationMethod auth.Method `json:"authenticationMethod"`
+	Actor                auth.Actor  `json:"actor"`
 }
 
 func WriteJSON(w http.ResponseWriter, request *http.Request, status int, value any) {

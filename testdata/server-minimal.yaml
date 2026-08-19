@@ -6,6 +6,8 @@ stateDir: /tmp/elastic-maintainer-state
 mountRoots:
   - /tmp/elastic-maintainer-sources
 oidc:
+  enabled: false
+  secretMountRoot: /var/run/secrets/elastic-maintainer
   issuerURL: https://identity.example.test
   clientID: elastic-maintainer-local
   clientSecret:
@@ -19,6 +21,8 @@ oidc:
   redirectURL: http://127.0.0.1:18080/auth/callback
   scopes:
     - openid
+  endpointOrigins:
+    - https://identity.example.test
 authorization:
   roleClaim: groups
   roleMappings:

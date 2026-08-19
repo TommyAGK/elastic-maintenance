@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +23,33 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
 )
 
+type serverSessionSecrets struct{ contents []byte }
+
+func (secrets serverSessionSecrets) Read(context.Context, config.SecretKeyRef) ([]byte, error) {
+	return append([]byte{}, secrets.contents...), nil
+}
+
+type conflictBrowserAuth struct{}
+
+func (conflictBrowserAuth) BeginLogin(http.ResponseWriter, *http.Request) error {
+	return auth.ErrAuthenticationConflict
+}
+func (conflictBrowserAuth) CompleteCallback(http.ResponseWriter, *http.Request) error {
+	return auth.ErrAuthenticationConflict
+}
+func (conflictBrowserAuth) Logout(http.ResponseWriter, *http.Request) error {
+	return auth.ErrAuthenticationConflict
+}
+
+func TestBrowserCallbackConflictReturnsDocumentedStatus(t *testing.T) {
+	handler := NewHandler(HandlerOptions{BrowserAuth: conflictBrowserAuth{}})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/auth/callback", nil))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "authentication_conflict") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestHandlerRoutes(t *testing.T) {
 	for name, testCase := range map[string]struct {
 		method          string
@@ -29,16 +59,16 @@ func TestHandlerRoutes(t *testing.T) {
 		wantCode        string
 		wantStatusValue string
 	}{
-		"live":                  {method: http.MethodGet, path: "/health/live", ready: false, wantStatus: http.StatusOK, wantStatusValue: "live"},
-		"ready":                 {method: http.MethodGet, path: "/health/ready", ready: true, wantStatus: http.StatusOK, wantStatusValue: "ready"},
-		"not ready":             {method: http.MethodGet, path: "/health/ready", ready: false, wantStatus: http.StatusServiceUnavailable, wantCode: "not_ready"},
-		"login placeholder":     {method: http.MethodGet, path: "/auth/login", wantStatus: http.StatusNotImplemented, wantCode: "not_implemented"},
-		"callback placeholder":  {method: http.MethodGet, path: "/auth/callback", wantStatus: http.StatusNotImplemented, wantCode: "not_implemented"},
-		"logout placeholder":    {method: http.MethodPost, path: "/auth/logout", wantStatus: http.StatusNotImplemented, wantCode: "not_implemented"},
-		"protected API root":    {method: http.MethodGet, path: "/api/v1", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
-		"protected API":         {method: http.MethodGet, path: "/api/v1/session", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
-		"protected unknown API": {method: http.MethodGet, path: "/api/v1/future", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
-		"unknown route":         {method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound, wantCode: "not_found"},
+		"live":                   {method: http.MethodGet, path: "/health/live", ready: false, wantStatus: http.StatusOK, wantStatusValue: "live"},
+		"ready":                  {method: http.MethodGet, path: "/health/ready", ready: true, wantStatus: http.StatusOK, wantStatusValue: "ready"},
+		"not ready":              {method: http.MethodGet, path: "/health/ready", ready: false, wantStatus: http.StatusServiceUnavailable, wantCode: "not_ready"},
+		"OIDC unavailable":       {method: http.MethodGet, path: "/auth/login", wantStatus: http.StatusServiceUnavailable, wantCode: "oidc_unavailable"},
+		"callback unavailable":   {method: http.MethodGet, path: "/auth/callback", wantStatus: http.StatusServiceUnavailable, wantCode: "oidc_unavailable"},
+		"logout unauthenticated": {method: http.MethodPost, path: "/auth/logout", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
+		"protected API root":     {method: http.MethodGet, path: "/api/v1", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
+		"protected API":          {method: http.MethodGet, path: "/api/v1/session", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
+		"protected unknown API":  {method: http.MethodGet, path: "/api/v1/future", wantStatus: http.StatusUnauthorized, wantCode: "authentication_required"},
+		"unknown route":          {method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound, wantCode: "not_found"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			handler := NewHandler(HandlerOptions{IsReady: func() bool { return testCase.ready }})
@@ -95,7 +125,7 @@ func TestAuthenticatedSessionAndProtectedRouting(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil {
 		t.Fatal(err)
 	}
-	if session.APIVersion != api.Version || !session.Authenticated || session.Actor.Subject != "operator-1" || session.Actor.DisplayName != "Operator" || len(session.Actor.Roles) != 2 || session.Actor.Roles[0] != auth.RolePlanner || session.Actor.Roles[1] != auth.RoleViewer {
+	if session.APIVersion != api.Version || !session.Authenticated || session.AuthenticationMethod != auth.MethodSession || session.Actor.Subject != "operator-1" || session.Actor.DisplayName != "Operator" || len(session.Actor.Roles) != 2 || session.Actor.Roles[0] != auth.RolePlanner || session.Actor.Roles[1] != auth.RoleViewer {
 		t.Fatalf("session = %#v", session)
 	}
 
@@ -121,6 +151,23 @@ func TestProtectedRouteAuthorizationDeniesActorWithoutRole(t *testing.T) {
 	}
 	if envelope.Error.Code != "permission_denied" {
 		t.Fatalf("error = %#v", envelope.Error)
+	}
+}
+
+func TestAuthenticationAmbiguityReturnsConflict(t *testing.T) {
+	key := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+	service, err := auth.NewBrowserOIDC(auth.BrowserOIDCOptions{OIDC: config.OIDCConfig{Enabled: true, IssuerURL: "https://identity.example.test", EndpointOrigins: []string{"https://identity.example.test"}, ClientID: "client", SessionSecret: config.SecretKeyRef{Key: "session"}, RedirectURL: "https://app.example.test/auth/callback", Scopes: []string{"openid"}}, Authorization: config.AuthorizationConfig{}, Secrets: serverSessionSecrets{contents: []byte("elastic-maintainer-session-keyring/v1\ncurrent test " + key + "\n")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(HandlerOptions{Authenticator: service, BrowserAuth: service})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "first"})
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "second"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "authentication_conflict") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -315,6 +362,7 @@ func TestHTTPRuntimeServesAndShutsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.OIDC.Enabled = false
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -361,6 +409,39 @@ func TestHTTPRuntimeServesAndShutsDown(t *testing.T) {
 	}
 	if runtime.ready.Load() {
 		t.Fatal("runtime remained ready after shutdown")
+	}
+}
+
+func TestHTTPRuntimeOIDCInitializationDoesNotContactProvider(t *testing.T) {
+	cfg, err := config.LoadServerConfig("../config/testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	cfg.OIDC.SecretMountRoot = root
+	directory := filepath.Join(root, cfg.OIDC.SessionSecret.Namespace, cfg.OIDC.SessionSecret.Name)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	key := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	if err := os.WriteFile(filepath.Join(directory, cfg.OIDC.SessionSecret.Key), []byte("elastic-maintainer-session-keyring/v1\ncurrent test "+key+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.OIDC.IssuerURL = "https://127.0.0.1:1"
+	cfg.OIDC.EndpointOrigins = []string{"https://127.0.0.1:1"}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := func(string, string) (net.Listener, error) { return listener, nil }
+	runtimeValue, err := newHTTPRuntime(cfg, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := runtimeValue.Shutdown(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -8,9 +8,6 @@
   "security": [
     {
       "sessionCookie": []
-    },
-    {
-      "bearerAuth": []
     }
   ],
   "paths": {
@@ -44,8 +41,14 @@
         "operationId": "beginOIDCLogin",
         "security": [],
         "responses": {
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "302": {
+            "description": "Redirect to the configured OIDC authorization endpoint"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -55,8 +58,17 @@
         "operationId": "completeOIDCCallback",
         "security": [],
         "responses": {
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "303": {
+            "description": "OIDC login completed; application session established"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -65,8 +77,20 @@
       "post": {
         "operationId": "logout",
         "responses": {
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "204": {
+            "description": "Local browser session deleted"
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -101,6 +125,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PermissionDenied"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -132,6 +159,9 @@
             "$ref": "#/components/responses/APIError"
           },
           "422": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "409": {
             "$ref": "#/components/responses/APIError"
           }
         },
@@ -193,6 +223,9 @@
           },
           "404": {
             "$ref": "#/components/responses/APIError"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -224,6 +257,9 @@
             "$ref": "#/components/responses/APIError"
           },
           "422": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "409": {
             "$ref": "#/components/responses/APIError"
           }
         },
@@ -279,6 +315,9 @@
           },
           "404": {
             "$ref": "#/components/responses/APIError"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -304,6 +343,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -342,6 +384,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       },
@@ -378,6 +423,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -406,6 +454,9 @@
             "$ref": "#/components/responses/APIError"
           },
           "503": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "409": {
             "$ref": "#/components/responses/APIError"
           }
         },
@@ -514,6 +565,9 @@
           },
           "404": {
             "$ref": "#/components/responses/APIError"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -534,6 +588,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       },
@@ -560,6 +617,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -585,6 +645,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -616,6 +679,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -636,6 +702,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -661,6 +730,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -681,6 +753,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -706,6 +781,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -726,6 +804,9 @@
           },
           "501": {
             "$ref": "#/components/responses/NotImplemented"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -736,7 +817,7 @@
       "sessionCookie": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "__Host-elastic-maintainer"
+        "name": "__Host-elastic-maintainer-session"
       },
       "bearerAuth": {
         "type": "http",
@@ -1023,7 +1104,8 @@
         "required": [
           "apiVersion",
           "authenticated",
-          "actor"
+          "actor",
+          "authenticationMethod"
         ],
         "properties": {
           "apiVersion": {
@@ -1037,6 +1119,15 @@
           },
           "actor": {
             "$ref": "#/components/schemas/Actor"
+          },
+          "authenticationMethod": {
+            "type": "string",
+            "enum": [
+              "session",
+              "oidc",
+              "bearer",
+              "break-glass"
+            ]
           }
         }
       },

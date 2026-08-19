@@ -22,7 +22,7 @@ func TestEmbeddedOperatorInterfaceIsSelfContainedAndReadOnly(t *testing.T) {
 	if !ok || javascript.ContentType != "text/javascript; charset=utf-8" {
 		t.Fatalf("JavaScript asset = %#v, %v", javascript, ok)
 	}
-	for _, required := range [][]byte{[]byte("/api/v1/session"), []byte("/api/v1/sources"), []byte("/api/v1/targets"), []byte("/api/v1/validations"), []byte("method:\"POST\""), []byte("Idempotency-Key")} {
+	for _, required := range [][]byte{[]byte("/api/v1/session"), []byte("/api/v1/sources"), []byte("/api/v1/targets"), []byte("/api/v1/validations"), []byte("method:\"POST\""), []byte("Idempotency-Key"), []byte("/auth/logout"), []byte("authenticationMethod")} {
 		if !bytes.Contains(javascript.Content, required) {
 			t.Errorf("JavaScript does not contain %q", required)
 		}

@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	ServerAPIVersion     = "elastic-maintainer/v1alpha1"
-	DefaultConfigPath    = "/etc/elastic-maintainer/elastic-maintainer.yaml"
-	DefaultListenAddress = ":8080"
-	DefaultStateDir      = "/var/lib/elastic-maintainer/state"
-	maxServerConfigBytes = 1 << 20
+	ServerAPIVersion           = "elastic-maintainer/v1alpha1"
+	DefaultConfigPath          = "/etc/elastic-maintainer/elastic-maintainer.yaml"
+	DefaultListenAddress       = ":8080"
+	DefaultStateDir            = "/var/lib/elastic-maintainer/state"
+	DefaultOIDCSecretMountRoot = "/var/run/secrets/elastic-maintainer"
+	maxServerConfigBytes       = 1 << 20
 )
 
 var (
@@ -59,12 +60,15 @@ type ServerConfig struct {
 }
 
 type OIDCConfig struct {
+	Enabled          bool         `yaml:"enabled,omitempty"`
+	SecretMountRoot  string       `yaml:"secretMountRoot,omitempty"`
 	IssuerURL        string       `yaml:"issuerURL"`
 	ClientID         string       `yaml:"clientID"`
 	ClientSecret     SecretKeyRef `yaml:"clientSecret"`
 	SessionSecret    SecretKeyRef `yaml:"sessionSecret"`
 	RedirectURL      string       `yaml:"redirectURL"`
 	Scopes           []string     `yaml:"scopes,omitempty"`
+	EndpointOrigins  []string     `yaml:"endpointOrigins,omitempty"`
 	SubjectClaim     string       `yaml:"subjectClaim,omitempty"`
 	DisplayNameClaim string       `yaml:"displayNameClaim,omitempty"`
 }
@@ -199,7 +203,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 		return nil, errors.New("read server config: file changed while reading")
 	}
 
-	cfg := &ServerConfig{Listen: DefaultListenAddress, StateDir: DefaultStateDir}
+	cfg := &ServerConfig{Listen: DefaultListenAddress, StateDir: DefaultStateDir, OIDC: OIDCConfig{SecretMountRoot: DefaultOIDCSecretMountRoot}}
 	decoder := yaml.NewDecoder(bytes.NewReader(contents))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(cfg); err != nil {
@@ -362,43 +366,65 @@ func (cfg *ServerConfig) ValidateStartup() error {
 		}
 	}
 
-	issuerURL, issuerErr := validateHTTPSURL("oidc.issuerURL", cfg.OIDC.IssuerURL, true)
-	if issuerErr != nil {
-		add("%v", issuerErr)
-	}
-	if strings.TrimSpace(cfg.OIDC.ClientID) == "" {
-		add("oidc.clientID is required")
-	}
-	validateSecretKeyRef("oidc.clientSecret", cfg.OIDC.ClientSecret, &problems)
-	validateSecretKeyRef("oidc.sessionSecret", cfg.OIDC.SessionSecret, &problems)
-	redirectURL, redirectErr := validateHTTPSURL("oidc.redirectURL", cfg.OIDC.RedirectURL, true)
-	if redirectErr != nil {
-		add("%v", redirectErr)
-	} else {
-		if publicURL != nil && !sameOrigin(publicURL, redirectURL) {
-			add("oidc.redirectURL must have the same origin as publicURL")
+	oidcConfigured := cfg.OIDC.Enabled || cfg.OIDC.IssuerURL != "" || cfg.OIDC.ClientID != "" || cfg.OIDC.ClientSecret != (SecretKeyRef{}) || cfg.OIDC.SessionSecret != (SecretKeyRef{}) || cfg.OIDC.RedirectURL != "" || len(cfg.OIDC.Scopes) != 0 || len(cfg.OIDC.EndpointOrigins) != 0 || cfg.OIDC.SubjectClaim != "" || cfg.OIDC.DisplayNameClaim != ""
+	if oidcConfigured {
+		if err := validateAbsoluteDir("oidc.secretMountRoot", cfg.OIDC.SecretMountRoot); err != nil {
+			add("%v", err)
 		}
-		if redirectURL.Path != "/auth/callback" {
-			add("oidc.redirectURL path must be /auth/callback")
+		issuerURL, issuerErr := validateHTTPSURL("oidc.issuerURL", cfg.OIDC.IssuerURL, true)
+		if issuerErr != nil {
+			add("%v", issuerErr)
 		}
-	}
-	if issuerURL != nil && publicURL != nil && canonicalURL(issuerURL) == canonicalURL(publicURL) {
-		add("oidc.issuerURL must not equal publicURL")
-	}
-	hasOpenIDScope := false
-	for _, scope := range cfg.OIDC.Scopes {
-		if scope == "openid" {
-			hasOpenIDScope = true
+		if strings.TrimSpace(cfg.OIDC.ClientID) == "" {
+			add("oidc.clientID is required")
 		}
-	}
-	if !hasOpenIDScope {
-		add("oidc.scopes must include openid")
-	}
-	if cfg.OIDC.SubjectClaim != "" && !identifierPattern.MatchString(cfg.OIDC.SubjectClaim) {
-		add("oidc.subjectClaim is invalid")
-	}
-	if cfg.OIDC.DisplayNameClaim != "" && !identifierPattern.MatchString(cfg.OIDC.DisplayNameClaim) {
-		add("oidc.displayNameClaim is invalid")
+		validateSecretKeyRef("oidc.clientSecret", cfg.OIDC.ClientSecret, &problems)
+		validateSecretKeyRef("oidc.sessionSecret", cfg.OIDC.SessionSecret, &problems)
+		redirectURL, redirectErr := validateHTTPSURL("oidc.redirectURL", cfg.OIDC.RedirectURL, true)
+		if redirectErr != nil {
+			add("%v", redirectErr)
+		} else {
+			if publicURL != nil && !sameOrigin(publicURL, redirectURL) {
+				add("oidc.redirectURL must have the same origin as publicURL")
+			}
+			if redirectURL.Path != "/auth/callback" {
+				add("oidc.redirectURL path must be /auth/callback")
+			}
+		}
+		if issuerURL != nil && publicURL != nil && canonicalURL(issuerURL) == canonicalURL(publicURL) {
+			add("oidc.issuerURL must not equal publicURL")
+		}
+		hasOpenIDScope := false
+		for _, scope := range cfg.OIDC.Scopes {
+			if scope == "openid" {
+				hasOpenIDScope = true
+			}
+		}
+		if !hasOpenIDScope {
+			add("oidc.scopes must include openid")
+		}
+		seenEndpointOrigins := map[string]bool{}
+		for index, origin := range cfg.OIDC.EndpointOrigins {
+			parsed, err := validateOrigin(origin)
+			if err != nil {
+				add("oidc.endpointOrigins[%d]: %v", index, err)
+				continue
+			}
+			canonical := canonicalURL(parsed)
+			if seenEndpointOrigins[canonical] {
+				add("oidc.endpointOrigins contains duplicate origin %q", origin)
+			}
+			seenEndpointOrigins[canonical] = true
+		}
+		if cfg.OIDC.Enabled && len(cfg.OIDC.EndpointOrigins) == 0 {
+			add("oidc.endpointOrigins must contain at least one explicit origin when OIDC is enabled")
+		}
+		if cfg.OIDC.SubjectClaim != "" && !identifierPattern.MatchString(cfg.OIDC.SubjectClaim) {
+			add("oidc.subjectClaim is invalid")
+		}
+		if cfg.OIDC.DisplayNameClaim != "" && !identifierPattern.MatchString(cfg.OIDC.DisplayNameClaim) {
+			add("oidc.displayNameClaim is invalid")
+		}
 	}
 
 	if strings.TrimSpace(cfg.Authorization.RoleClaim) == "" {
@@ -435,9 +461,11 @@ func (cfg *ServerConfig) ValidateStartup() error {
 		{field: "oidc.clientSecret", ref: cfg.OIDC.ClientSecret},
 		{field: "oidc.sessionSecret", ref: cfg.OIDC.SessionSecret},
 	}
-	for _, item := range secretRefs {
-		if item.ref.Namespace != cfg.SecretPolicy.Namespace {
-			add("%s.namespace must equal secretPolicy.namespace", item.field)
+	if oidcConfigured {
+		for _, item := range secretRefs {
+			if item.ref.Namespace != cfg.SecretPolicy.Namespace {
+				add("%s.namespace must equal secretPolicy.namespace", item.field)
+			}
 		}
 	}
 

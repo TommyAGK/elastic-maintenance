@@ -10,6 +10,10 @@ Complete production authentication/authorization, safely provision target creden
 - Pinned Kibana fixtures exist for both supported versions.
 - Deployment namespace and Secret prefix policy are defined.
 
+## Current status
+
+Substep 2.1 is implemented. Browser authentication now uses lazy, explicitly origin-pinned OIDC discovery, Authorization Code with PKCE/state/nonce, strict callback-origin and token validation, bounded redirect-free provider/JWKS HTTP, configured claim-to-role mapping, and stateless protected sessions. Session and transaction cookies are purpose-separated AES-GCM envelopes backed by a live mounted key ring; current plus at most two previous keys provide bounded rotation overlap. Existing sessions authenticate without contacting the IdP, while login/callback fail closed during provider outages. Linux reads projected Secret keys descriptor-relatively with `openat2` beneath the configured mount; the non-Linux test fallback requires an immutable administrator-controlled root. Break-glass access begins in substep 2.2.
+
 ## Substeps
 
 ### 2.1 Implement browser OIDC
@@ -21,6 +25,8 @@ Complete production authentication/authorization, safely provision target creden
 5. Store session key in a mounted Kubernetes Secret.
 6. Implement login, callback, logout, session inspection, expiry, and key rotation behavior.
 7. Never put tokens in browser storage or logs.
+
+Implementation note: enabled OIDC requires an explicit `endpointOrigins` allowlist. Secret refs resolve beneath `oidc.secretMountRoot` as `<namespace>/<secret-name>/<key>`. The session-key value is a strict `elastic-maintainer-session-keyring/v1` text document with one `current <id> <base64url-32-byte-key>` line and up to two `previous` lines. Login transactions expire after 10 minutes; application sessions expire after at most eight hours or the ID token expiry, whichever is earlier. Rotating away a previous key invalidates its sessions and in-flight transactions.
 
 ### 2.2 Implement break-glass local administrator access
 
