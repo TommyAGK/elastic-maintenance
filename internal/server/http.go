@@ -108,6 +108,7 @@ func newHTTPRuntime(
 	var browserAuth BrowserAuthenticator
 	var logoutAuth BrowserAuthenticator
 	var oidcAuth *auth.BrowserOIDC
+	var bearerAuth *auth.BearerOIDC
 	var breakGlassAuth *auth.BreakGlassService
 	var authenticators []auth.Authenticator
 	if cfg.OIDC.Enabled || cfg.BreakGlass.Enabled {
@@ -125,6 +126,11 @@ func newHTTPRuntime(
 			browserAuth = oidcAuth
 			logoutAuth = oidcAuth
 			authenticators = append(authenticators, oidcAuth)
+			bearerAuth, err = auth.NewBearerOIDC(oidcAuth)
+			if err != nil {
+				listener.Close()
+				return nil, fmt.Errorf("initialize bearer authentication: %w", err)
+			}
 		}
 		if cfg.BreakGlass.Enabled {
 			recorder := audit.LogRecorder{Logger: logger}
@@ -167,7 +173,8 @@ func newHTTPRuntime(
 	runtime := &HTTPRuntime{listener: listener, validation: validationService, build: build.Normalized()}
 	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth}
 	if len(authenticators) != 0 {
-		handlerOptions.Authenticator = auth.NewCompositeAuthenticator(authenticators...)
+		sessions := auth.NewCompositeAuthenticator(authenticators...)
+		handlerOptions.Authenticator = auth.NewRequestAuthenticator(sessions, bearerAuth)
 	}
 	handler := NewHandler(handlerOptions)
 	runtime.server = &http.Server{
@@ -470,6 +477,10 @@ func planSubresourceHandler(authorizer auth.Authorizer) http.Handler {
 func authenticate(authenticator auth.Authenticator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		actor, err := authenticator.Authenticate(request)
+		if errors.Is(err, auth.ErrOIDCUnavailable) {
+			api.WriteError(w, request, http.StatusServiceUnavailable, "authentication_unavailable", "authentication provider is unavailable", RequestID(request.Context()))
+			return
+		}
 		if errors.Is(err, auth.ErrAuthenticationConflict) {
 			api.WriteError(w, request, http.StatusConflict, "authentication_conflict", "multiple authentication identities are not allowed", RequestID(request.Context()))
 			return

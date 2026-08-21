@@ -45,16 +45,17 @@ type BrowserOIDCOptions struct {
 }
 
 type BrowserOIDC struct {
-	config          config.OIDCConfig
-	authorization   config.AuthorizationConfig
-	secrets         secretmount.Reader
-	cookies         *cookieCodec
-	httpClient      *http.Client
-	now             func() time.Time
-	trustedProxies  []*net.IPNet
-	providerMu      sync.Mutex
-	provider        *oidc.Provider
-	providerExpires time.Time
+	config             config.OIDCConfig
+	authorization      config.AuthorizationConfig
+	secrets            secretmount.Reader
+	cookies            *cookieCodec
+	httpClient         *http.Client
+	now                func() time.Time
+	trustedProxies     []*net.IPNet
+	providerMu         sync.Mutex
+	provider           *oidc.Provider
+	providerExpires    time.Time
+	providerRetryAfter time.Time
 }
 
 func NewBrowserOIDC(options BrowserOIDCOptions) (*BrowserOIDC, error) {
@@ -75,10 +76,7 @@ func NewBrowserOIDC(options BrowserOIDCOptions) (*BrowserOIDC, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := options.HTTPClient
-	if client == nil {
-		client = newOIDCHTTPClient()
-	}
+	client := secureOIDCHTTPClient(options.HTTPClient)
 	trusted := make([]*net.IPNet, 0, len(options.TrustedProxies))
 	for _, value := range options.TrustedProxies {
 		_, network, err := net.ParseCIDR(value)
@@ -224,7 +222,7 @@ func (service *BrowserOIDC) CompleteCallback(w http.ResponseWriter, request *htt
 	if err != nil {
 		return ErrInvalidAuthentication
 	}
-	actor, err := service.actorFromToken(idToken, transaction.Nonce)
+	actor, err := service.actorFromToken(idToken, transaction.Nonce, MethodOIDC)
 	if err != nil {
 		return ErrInvalidAuthentication
 	}
@@ -281,8 +279,12 @@ func (service *BrowserOIDC) getProvider(ctx context.Context) (*oidc.Provider, er
 	if service.provider != nil && now.Before(service.providerExpires) {
 		return service.provider, nil
 	}
+	if now.Before(service.providerRetryAfter) {
+		return nil, ErrOIDCUnavailable
+	}
 	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, service.httpClient), service.config.IssuerURL)
 	if err != nil {
+		service.providerRetryAfter = service.now().UTC().Add(5 * time.Second)
 		return nil, ErrOIDCUnavailable
 	}
 	var metadata struct {
@@ -292,8 +294,10 @@ func (service *BrowserOIDC) getProvider(ctx context.Context) (*oidc.Provider, er
 		JWKSURI               string `json:"jwks_uri"`
 	}
 	if err := provider.Claims(&metadata); err != nil || metadata.Issuer != service.config.IssuerURL || !service.validProviderEndpoint(metadata.AuthorizationEndpoint) || !service.validProviderEndpoint(metadata.TokenEndpoint) || !service.validProviderEndpoint(metadata.JWKSURI) {
+		service.providerRetryAfter = service.now().UTC().Add(5 * time.Second)
 		return nil, ErrOIDCUnavailable
 	}
+	service.providerRetryAfter = time.Time{}
 	service.provider = provider
 	service.providerExpires = now.Add(providerCacheLifetime)
 	return provider, nil
@@ -302,12 +306,12 @@ func (service *BrowserOIDC) oauthConfig(provider *oidc.Provider, secret string) 
 	return &oauth2.Config{ClientID: service.config.ClientID, ClientSecret: secret, Endpoint: provider.Endpoint(), RedirectURL: service.config.RedirectURL, Scopes: append([]string{}, service.config.Scopes...)}
 }
 
-func (service *BrowserOIDC) actorFromToken(token *oidc.IDToken, expectedNonce string) (Actor, error) {
+func (service *BrowserOIDC) actorFromToken(token *oidc.IDToken, expectedNonce string, method Method) (Actor, error) {
 	var claims map[string]json.RawMessage
 	if err := token.Claims(&claims); err != nil {
 		return Actor{}, err
 	}
-	if !claimStringEquals(claims, "nonce", expectedNonce) {
+	if expectedNonce != "" && !claimStringEquals(claims, "nonce", expectedNonce) {
 		return Actor{}, ErrInvalidAuthentication
 	}
 	if len(token.Audience) > 1 && !claimStringEquals(claims, "azp", service.config.ClientID) {
@@ -348,7 +352,7 @@ func (service *BrowserOIDC) actorFromToken(token *oidc.IDToken, expectedNonce st
 	if len(roles) == 0 {
 		return Actor{}, ErrPermissionDenied
 	}
-	return Actor{Subject: subject, DisplayName: display, Roles: roles, Method: MethodOIDC}.Normalized()
+	return Actor{Subject: subject, DisplayName: display, Roles: roles, Method: method}.Normalized()
 }
 func claimString(claims map[string]json.RawMessage, name string) (string, bool) {
 	raw, ok := claims[name]
@@ -489,16 +493,52 @@ func canonicalWebHost(value *url.URL) string {
 	return host
 }
 
-func newOIDCHTTPClient() *http.Client {
-	return &http.Client{Transport: &boundedRoundTripper{base: http.DefaultTransport, limit: maxOIDCHTTPBodyBytes}, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("OIDC redirects are not allowed") }}
+func newOIDCHTTPClient() *http.Client { return secureOIDCHTTPClient(nil) }
+func secureOIDCHTTPClient(input *http.Client) *http.Client {
+	transport := http.DefaultTransport
+	if input != nil && input.Transport != nil {
+		transport = input.Transport
+	}
+	return &http.Client{Transport: &boundedRoundTripper{base: transport, limit: maxOIDCHTTPBodyBytes}, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("OIDC redirects are not allowed") }}
 }
 
+type outboundGETState struct {
+	inFlight   bool
+	retryAfter time.Time
+}
 type boundedRoundTripper struct {
 	base  http.RoundTripper
 	limit int64
+	mu    sync.Mutex
+	gets  map[string]outboundGETState
 }
 
 func (transport *boundedRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	key := ""
+	if request.Method == http.MethodGet {
+		key = request.URL.String()
+		now := time.Now()
+		transport.mu.Lock()
+		if transport.gets == nil {
+			transport.gets = map[string]outboundGETState{}
+		}
+		state := transport.gets[key]
+		if state.inFlight || now.Before(state.retryAfter) {
+			transport.mu.Unlock()
+			return nil, errors.New("OIDC upstream GET is rate limited")
+		}
+		state.inFlight = true
+		transport.gets[key] = state
+		transport.mu.Unlock()
+		defer func() {
+			transport.mu.Lock()
+			state := transport.gets[key]
+			state.inFlight = false
+			state.retryAfter = time.Now().Add(5 * time.Second)
+			transport.gets[key] = state
+			transport.mu.Unlock()
+		}()
+	}
 	response, err := transport.base.RoundTrip(request)
 	if err != nil {
 		return nil, err

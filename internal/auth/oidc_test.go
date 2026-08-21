@@ -250,7 +250,7 @@ func TestOIDCDiscoveryRejectsUnpinnedEndpointOrigin(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
-func TestDefaultOIDCHTTPClientRejectsRedirectsAndOversizedBodies(t *testing.T) {
+func TestSuppliedOIDCHTTPClientIsWrappedWithRedirectAndBodyBounds(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/redirect" {
 			http.Redirect(w, r, "/target", http.StatusFound)
@@ -259,7 +259,7 @@ func TestDefaultOIDCHTTPClientRejectsRedirectsAndOversizedBodies(t *testing.T) {
 		w.Write([]byte(strings.Repeat("x", int(maxOIDCHTTPBodyBytes)+1)))
 	}))
 	defer server.Close()
-	client := newOIDCHTTPClient()
+	client := secureOIDCHTTPClient(&http.Client{Transport: http.DefaultTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return nil }})
 	if _, err := client.Get(server.URL + "/redirect"); err == nil {
 		t.Fatal("redirect was accepted")
 	}

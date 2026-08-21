@@ -89,6 +89,32 @@ func TestOpenAPICoversInitialWebFirstSurface(t *testing.T) {
 	}
 }
 
+func TestOpenAPIDocumentsIndependentSessionAndBearerAuthentication(t *testing.T) {
+	document := openAPITestDocument(t)
+	security := document["security"].([]any)
+	if len(security) != 2 {
+		t.Fatalf("security=%#v", security)
+	}
+	alternatives := map[string]bool{}
+	for _, raw := range security {
+		entry := raw.(map[string]any)
+		if len(entry) != 1 {
+			t.Fatalf("security alternative=%#v", entry)
+		}
+		for name := range entry {
+			alternatives[name] = true
+		}
+	}
+	if !alternatives["sessionCookie"] || !alternatives["bearerAuth"] {
+		t.Fatalf("security=%#v", security)
+	}
+	schemes := objectAt(t, objectAt(t, document, "components"), "securitySchemes")
+	bearer := schemes["bearerAuth"].(map[string]any)
+	if bearer["type"] != "http" || bearer["scheme"] != "bearer" || bearer["bearerFormat"] != "JWT" {
+		t.Fatalf("bearerAuth=%#v", bearer)
+	}
+}
+
 func TestOpenAPIUnfinishedRoutesAreExplicit(t *testing.T) {
 	document := openAPITestDocument(t)
 	paths := objectAt(t, document, "paths")

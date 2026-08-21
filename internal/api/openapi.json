@@ -8,6 +8,9 @@
   "security": [
     {
       "sessionCookie": []
+    },
+    {
+      "bearerAuth": []
     }
   ],
   "paths": {
@@ -127,6 +130,9 @@
             "$ref": "#/components/responses/PermissionDenied"
           },
           "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -346,6 +352,9 @@
           },
           "409": {
             "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -387,6 +396,9 @@
           },
           "409": {
             "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       },
@@ -425,6 +437,9 @@
             "$ref": "#/components/responses/NotImplemented"
           },
           "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -591,6 +606,9 @@
           },
           "409": {
             "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       },
@@ -620,6 +638,9 @@
           },
           "409": {
             "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -647,6 +668,9 @@
             "$ref": "#/components/responses/NotImplemented"
           },
           "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -682,6 +706,9 @@
           },
           "409": {
             "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -704,6 +731,9 @@
             "$ref": "#/components/responses/NotImplemented"
           },
           "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -733,6 +763,9 @@
           },
           "409": {
             "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -755,6 +788,9 @@
             "$ref": "#/components/responses/NotImplemented"
           },
           "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -784,6 +820,9 @@
           },
           "409": {
             "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
           }
         }
       }
@@ -806,6 +845,9 @@
             "$ref": "#/components/responses/NotImplemented"
           },
           "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -864,7 +906,8 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "bearerFormat": "JWT"
+        "bearerFormat": "JWT",
+        "description": "OIDC JWT access token, bounded to 16 KiB and validated with RS256 or ES256 against the configured pinned issuer, client audience, JWKS transport, and claim-to-role mapping. Bearer tokens do not require a browser nonce. Duplicate Authorization headers or any simultaneous application-session cookie are rejected."
       }
     },
     "parameters": {
