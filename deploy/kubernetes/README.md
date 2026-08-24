@@ -1,7 +1,7 @@
 # Kubernetes delivery status
 
-There are no supported Kubernetes manifests in the Phase 0 API-server skeleton.
+The full production workload manifests remain scheduled for Phase 6. The obsolete one-shot `Job` was removed because it invoked the retired CLI and exposed Kibana credentials through process environment variables.
 
-The obsolete one-shot `Job` manifest was removed because it invoked the retired review/apply CLI and passed Kibana credentials through process environment variables. It must not be used as a deployment template.
+`secret-rbac.yaml` is the Phase 2 least-privilege RBAC boundary for target credential Secrets. It creates the `elastic-maintainer` ServiceAccount and grants only `get`, `create`, `update`, and `delete` on Secrets in one namespace—never list or watch. Adjust all namespace fields through the authorized deployment workflow, and configure the eventual Deployment with `serviceAccountName: elastic-maintainer`. Kubernetes RBAC cannot express a name-prefix wildcard, so the application independently enforces the configured namespace, `elastic-maintainer-target-` prefix, state ownership annotation, and target ownership annotation before every operation.
 
-Phase 6 will provide the supported single-replica `Deployment`, `Service`, TLS `Ingress`, ReadWriteOnce PVC, ConfigMap/Secret mounts, namespaced Secret RBAC, probes, security context, and NetworkPolicy examples described in `plan.md`.
+Phase 6 will add the supported single-replica `Deployment`, `Service`, TLS `Ingress`, ReadWriteOnce PVC, ConfigMap/Secret mounts, probes, security context, and NetworkPolicy examples described in `plan.md`.
