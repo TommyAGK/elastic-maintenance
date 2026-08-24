@@ -4,7 +4,7 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository has passed the **Phase 1: mounted inputs, resource sets, and validation API** gate and is not production-ready. Phase 2 is underway: production browser OIDC, OIDC JWT bearer authentication for automation, and audited break-glass local administrator access are implemented, including protected rotating sessions, pinned Argon2id verification, live emergency-session revocation, throttling, IdP-outage operation, and the mandatory rotation runbook. Broader audit hooks, target credential management, and live Kibana reads remain next. The active direction is defined by:
+The repository has passed the **Phase 1: mounted inputs, resource sets, and validation API** gate and is not production-ready. Phase 2 is underway: production browser OIDC, OIDC JWT bearer authentication for automation, and audited break-glass local administrator access are implemented, including protected rotating sessions, pinned Argon2id verification, live emergency-session revocation, throttling, IdP-outage operation, and the mandatory rotation runbook. Centralized endpoint/role enforcement and structured authentication/mutation audit hooks are also implemented. Kubernetes Secret-backed target credential management and live Kibana reads remain next. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`

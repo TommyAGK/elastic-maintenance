@@ -109,7 +109,8 @@ func TestBrowserOIDCLoginCallbackAndOfflineSession(t *testing.T) {
 	refClient := config.SecretKeyRef{Namespace: "ns", Name: "oidc", Key: "client"}
 	refSession := config.SecretKeyRef{Namespace: "ns", Name: "session", Key: "keys"}
 	secrets := memorySecrets{"client": []byte("client-secret-sentinel"), "keys": keyRingFixture("active", nil)}
-	service, err := NewBrowserOIDC(BrowserOIDCOptions{OIDC: config.OIDCConfig{Enabled: true, IssuerURL: issuer, ClientID: "client-1", ClientSecret: refClient, SessionSecret: refSession, RedirectURL: "https://app.example.test/auth/callback", Scopes: []string{"openid", "profile"}, EndpointOrigins: []string{issuer}, SubjectClaim: "sub", DisplayNameClaim: "name"}, Authorization: config.AuthorizationConfig{RoleClaim: "groups", RoleMapping: map[string][]string{"administrator": {"maintainers"}}}, Secrets: secrets, HTTPClient: provider.Client(), Now: func() time.Time { return clock }})
+	var audited Actor
+	service, err := NewBrowserOIDC(BrowserOIDCOptions{OIDC: config.OIDCConfig{Enabled: true, IssuerURL: issuer, ClientID: "client-1", ClientSecret: refClient, SessionSecret: refSession, RedirectURL: "https://app.example.test/auth/callback", Scopes: []string{"openid", "profile"}, EndpointOrigins: []string{issuer}, SubjectClaim: "sub", DisplayNameClaim: "name"}, Authorization: config.AuthorizationConfig{RoleClaim: "groups", RoleMapping: map[string][]string{"administrator": {"maintainers"}}}, Secrets: secrets, HTTPClient: provider.Client(), Now: func() time.Time { return clock }, Audit: func(_ context.Context, actor Actor) error { audited = actor; return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +167,9 @@ func TestBrowserOIDCLoginCallbackAndOfflineSession(t *testing.T) {
 	actor, err := service.Authenticate(authenticated)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if audited.Subject != "operator-1" || audited.Method != MethodOIDC {
+		t.Fatalf("audited actor=%#v", audited)
 	}
 	if actor.Subject != "operator-1" || actor.DisplayName != "Operator" || actor.Method != MethodOIDC || len(actor.Roles) != 1 || actor.Roles[0] != RoleAdministrator {
 		t.Fatalf("actor=%#v", actor)

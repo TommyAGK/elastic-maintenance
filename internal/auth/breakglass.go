@@ -263,34 +263,31 @@ func normalizedArgon2Concurrency(value int) int {
 // Login is the explicit browser entry point. It intentionally accepts only a
 // same-origin POST and creates the one shared application session cookie; it
 // does not redirect to or fall back to OIDC.
+func (service *BreakGlassService) denyLogin(ctx context.Context, reason string, original error) error {
+	if service.recordLogin(ctx, nil, "denied", reason) != nil {
+		return ErrBreakGlassUnavailable
+	}
+	return original
+}
 func (service *BreakGlassService) Login(w http.ResponseWriter, request *http.Request) error {
 	if service == nil || request == nil {
 		return ErrBreakGlassInvalidRequest
 	}
 	if request.Method != http.MethodPost {
-		service.recordLogin(request.Context(), nil, "denied", "invalid_request")
-		return ErrBreakGlassMethodNotAllowed
+		return service.denyLogin(request.Context(), "invalid_request", ErrBreakGlassMethodNotAllowed)
 	}
 	if request.URL.RawQuery != "" || request.URL.Fragment != "" {
-		service.recordLogin(request.Context(), nil, "denied", "invalid_request")
-		return ErrBreakGlassInvalidRequest
+		return service.denyLogin(request.Context(), "invalid_request", ErrBreakGlassInvalidRequest)
 	}
-	if len(request.Header.Values("Authorization")) != 0 {
-		service.recordLogin(request.Context(), nil, "denied", "identity_conflict")
-		return ErrAuthenticationConflict
-	}
-	if hasNamedCookie(request, SessionCookieName) {
-		service.recordLogin(request.Context(), nil, "denied", "identity_conflict")
-		return ErrAuthenticationConflict
+	if len(request.Header.Values("Authorization")) != 0 || hasNamedCookie(request, SessionCookieName) {
+		return service.denyLogin(request.Context(), "identity_conflict", ErrAuthenticationConflict)
 	}
 	if err := service.validSameOriginRequest(request); err != nil {
-		service.recordLogin(request.Context(), nil, "denied", "invalid_origin")
-		return err
+		return service.denyLogin(request.Context(), "invalid_origin", err)
 	}
 	input, err := decodeBreakGlassLoginInput(request)
 	if err != nil {
-		service.recordLogin(request.Context(), nil, "denied", "invalid_request")
-		return err
+		return service.denyLogin(request.Context(), "invalid_request", err)
 	}
 	encoded, expires, err := service.authenticateCredentials(request.Context(), service.requestSource(request), input.Username, input.Password)
 	if err != nil {
@@ -300,8 +297,7 @@ func (service *BreakGlassService) Login(w http.ResponseWriter, request *http.Req
 		} else if errors.Is(err, ErrBreakGlassUnavailable) {
 			reason = "credential_unavailable"
 		}
-		service.recordLogin(request.Context(), nil, "denied", reason)
-		return err
+		return service.denyLogin(request.Context(), reason, err)
 	}
 	actor := Actor{Subject: input.Username, Roles: []Role{RoleAdministrator}, Method: MethodBreakGlass}
 	if service.recordLogin(request.Context(), &actor, "succeeded", "") != nil {
@@ -332,19 +328,11 @@ func (service *BreakGlassService) Logout(w http.ResponseWriter, request *http.Re
 		return ErrBreakGlassInvalidRequest
 	}
 	if err := service.validSameOriginRequest(request); err != nil {
-		if service.recordLogin(request.Context(), nil, "denied", "invalid_origin") != nil {
-			return ErrBreakGlassUnavailable
-		}
 		return err
-	}
-	actor, _ := ActorFromContext(request.Context())
-	if service.audit != nil {
-		if err := service.audit(request.Context(), BreakGlassAuditEvent{Action: "logout", Actor: &actor, Outcome: "succeeded"}); err != nil {
-			return ErrBreakGlassAuthenticationFailed
-		}
 	}
 	clearProtectedCookie(w, SessionCookieName)
 	clearProtectedCookie(w, TransactionCookieName)
+	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 

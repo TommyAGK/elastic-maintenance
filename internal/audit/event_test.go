@@ -2,6 +2,8 @@ package audit
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -93,6 +95,22 @@ func TestEventHasNoCredentialValueFields(t *testing.T) {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("audit event includes forbidden field category %q", forbidden)
 		}
+	}
+}
+
+type failingAuditHandler struct{}
+
+func (failingAuditHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (failingAuditHandler) Handle(context.Context, slog.Record) error {
+	return errors.New("sink unavailable")
+}
+func (handler failingAuditHandler) WithAttrs([]slog.Attr) slog.Handler { return handler }
+func (handler failingAuditHandler) WithGroup(string) slog.Handler      { return handler }
+
+func TestLogRecorderPropagatesSinkFailure(t *testing.T) {
+	event := Event{OccurredAt: time.Now(), Actor: &auth.Actor{Subject: "user", Roles: []auth.Role{auth.RoleViewer}, Method: auth.MethodOIDC}, RequestID: "request-1", Action: ActionLogin, Outcome: OutcomeSucceeded}
+	if err := (LogRecorder{Logger: slog.New(failingAuditHandler{})}).Record(context.Background(), event); err == nil {
+		t.Fatal("Record error=nil")
 	}
 }
 

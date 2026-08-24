@@ -113,6 +113,7 @@ func (recorder LogRecorder) Record(ctx context.Context, event Event) error {
 		actor = event.Actor.Subject
 		method = string(event.Actor.Method)
 	}
-	recorder.Logger.WarnContext(ctx, "Security audit event", "action", event.Action, "outcome", event.Outcome, "reason_code", event.ReasonCode, "request_id", event.RequestID, "actor", actor, "authentication_method", method)
-	return nil
+	record := slog.NewRecord(event.OccurredAt, slog.LevelWarn, "Security audit event", 0)
+	record.AddAttrs(slog.Any("action", event.Action), slog.Any("outcome", event.Outcome), slog.String("reason_code", event.ReasonCode), slog.String("request_id", event.RequestID), slog.String("actor", actor), slog.String("authentication_method", method), slog.String("target_id", event.TargetID), slog.String("plan_id", event.PlanID), slog.String("job_id", event.JobID))
+	return recorder.Logger.Handler().Handle(ctx, record)
 }

@@ -96,6 +96,12 @@ func TestBearerOIDCValidationAndIdentityAmbiguity(t *testing.T) {
 	if _, err := authenticator.Authenticate(tamperedRequest); !errors.Is(err, ErrInvalidAuthentication) || calls.Load() != beforeTampered {
 		t.Fatalf("tampered known-kid amplification err=%v calls=%d/%d", err, calls.Load(), beforeTampered)
 	}
+	noRole := signedBearerToken(t, key, issuer, "client", []string{"unknown"})
+	noRoleRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	noRoleRequest.Header.Set("Authorization", "Bearer "+noRole)
+	if _, err := authenticator.Authenticate(noRoleRequest); !errors.Is(err, ErrInvalidAuthentication) {
+		t.Fatalf("no-role error=%v", err)
+	}
 	wrongAudience := signedBearerToken(t, key, issuer, "other", []string{"readers"})
 	bad := httptest.NewRequest(http.MethodGet, "/", nil)
 	bad.Header.Set("Authorization", "Bearer "+wrongAudience)

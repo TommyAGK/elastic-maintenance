@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,7 @@ type HandlerOptions struct {
 	Authorizer        auth.Authorizer
 	BrowserAuth       BrowserAuthenticator
 	LogoutAuth        BrowserAuthenticator
+	AuditRecorder     audit.Recorder
 	BreakGlassAuth    BreakGlassAuthenticator
 	ValidationBackend ValidationBackend
 }
@@ -105,6 +107,7 @@ func newHTTPRuntime(
 		return nil, fmt.Errorf("listen on configured address: %w", err)
 	}
 
+	securityAudit := audit.LogRecorder{Logger: logger}
 	var browserAuth BrowserAuthenticator
 	var logoutAuth BrowserAuthenticator
 	var oidcAuth *auth.BrowserOIDC
@@ -118,7 +121,9 @@ func newHTTPRuntime(
 			return nil, fmt.Errorf("open authentication secret mounts: %w", secretErr)
 		}
 		if cfg.OIDC.Enabled {
-			oidcAuth, err = auth.NewBrowserOIDC(auth.BrowserOIDCOptions{OIDC: cfg.OIDC, Authorization: cfg.Authorization, Secrets: secretReader, TrustedProxies: cfg.TrustedProxies})
+			oidcAuth, err = auth.NewBrowserOIDC(auth.BrowserOIDCOptions{OIDC: cfg.OIDC, Authorization: cfg.Authorization, Secrets: secretReader, TrustedProxies: cfg.TrustedProxies, Audit: func(ctx context.Context, actor auth.Actor) error {
+				return securityAudit.Record(ctx, audit.Event{OccurredAt: time.Now().UTC(), Actor: &actor, RequestID: RequestID(ctx), Action: audit.ActionLogin, Outcome: audit.OutcomeSucceeded})
+			}})
 			if err != nil {
 				listener.Close()
 				return nil, fmt.Errorf("initialize OIDC authentication: %w", err)
@@ -133,7 +138,6 @@ func newHTTPRuntime(
 			}
 		}
 		if cfg.BreakGlass.Enabled {
-			recorder := audit.LogRecorder{Logger: logger}
 			liveConfig := auth.BreakGlassConfigSourceFunc(func(ctx context.Context) (*config.ServerConfig, error) {
 				live, loadErr := config.LoadServerConfig(cfg.RuntimeConfigPath())
 				if loadErr != nil {
@@ -151,7 +155,7 @@ func newHTTPRuntime(
 				if event.Action == "logout" {
 					action = audit.ActionLogout
 				}
-				return recorder.Record(ctx, audit.Event{OccurredAt: time.Now().UTC(), Actor: event.Actor, RequestID: RequestID(ctx), Action: action, Outcome: outcome, ReasonCode: event.ReasonCode})
+				return securityAudit.Record(ctx, audit.Event{OccurredAt: time.Now().UTC(), Actor: event.Actor, RequestID: RequestID(ctx), Action: action, Outcome: outcome, ReasonCode: event.ReasonCode})
 			}})
 			if err != nil {
 				listener.Close()
@@ -171,7 +175,7 @@ func newHTTPRuntime(
 		return nil, fmt.Errorf("create validation service: %w", err)
 	}
 	runtime := &HTTPRuntime{listener: listener, validation: validationService, build: build.Normalized()}
-	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth}
+	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)
 		handlerOptions.Authenticator = auth.NewRequestAuthenticator(sessions, bearerAuth)
@@ -239,6 +243,10 @@ func NewHandler(options HandlerOptions) http.Handler {
 	if options.ValidationBackend == nil {
 		options.ValidationBackend = unavailableValidationBackend{}
 	}
+	auditRecorder := options.AuditRecorder
+	if auditRecorder == nil {
+		auditRecorder = audit.NopRecorder{}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, request *http.Request) {
@@ -268,12 +276,12 @@ func NewHandler(options HandlerOptions) http.Handler {
 		}
 	})
 	mux.Handle("/auth/login", browserLoginHandler(options.BrowserAuth))
-	mux.Handle("/auth/callback", browserCallbackHandler(options.BrowserAuth))
+	mux.Handle("/auth/callback", auditedAction(auditRecorder, logger, audit.ActionLogin, browserCallbackHandler(options.BrowserAuth)))
 	logoutAuth := options.LogoutAuth
 	if logoutAuth == nil {
 		logoutAuth = options.BrowserAuth
 	}
-	mux.Handle("/auth/logout", authenticate(authenticator, browserLogoutHandler(logoutAuth)))
+	mux.Handle("/auth/logout", authenticate(authenticator, auditedAction(auditRecorder, logger, audit.ActionLogout, browserLogoutHandler(logoutAuth))))
 	mux.Handle("/auth/break-glass/login", breakGlassLoginHandler(options.BreakGlassAuth))
 	mux.HandleFunc("/assets/", serveWebAsset)
 
@@ -303,7 +311,7 @@ func NewHandler(options HandlerOptions) http.Handler {
 	protectedMux.Handle("/api/v1/audit", authorize(authorizer, auth.PermissionAuditRead, readPlaceholder("audit inventory")))
 	protectedMux.HandleFunc("/api/v1", protectedNotFound)
 	protectedMux.HandleFunc("/api/v1/", protectedNotFound)
-	protectedAPI := authenticate(authenticator, protectedMux)
+	protectedAPI := authenticate(authenticator, auditedMutations(auditRecorder, logger, protectedMux))
 	mux.Handle("/api/v1", protectedAPI)
 	mux.Handle("/api/v1/", protectedAPI)
 	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {
@@ -471,6 +479,64 @@ func planSubresourceHandler(authorizer auth.Authorizer) http.Handler {
 			return
 		}
 		authorize(authorizer, auth.PermissionPlansApply, mutationJobPlaceholder("apply")).ServeHTTP(w, request)
+	})
+}
+
+func auditedMutations(recorder audit.Recorder, logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		action := ""
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/validations" {
+			action = string(audit.ActionValidationCreate)
+		} else if r.Method == http.MethodPost && r.URL.Path == "/api/v1/plans" {
+			action = string(audit.ActionPlanCreate)
+		} else if r.Method == http.MethodPost && len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "plans" && requestIDPattern.MatchString(parts[3]) && parts[4] == "apply" {
+			action = string(audit.ActionPlanApply)
+		} else if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "targets" && requestIDPattern.MatchString(parts[3]) && parts[4] == "credentials" {
+			if r.Method == http.MethodPut {
+				action = string(audit.ActionCredentialUpload)
+			} else if r.Method == http.MethodDelete {
+				action = string(audit.ActionCredentialDelete)
+			}
+		}
+		if action == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auditedAction(recorder, logger, audit.Action(action), next).ServeHTTP(w, r)
+	})
+}
+
+func auditedAction(recorder audit.Recorder, logger *slog.Logger, action audit.Action, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tracked := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(tracked, r)
+		actor, hasActor := auth.ActorFromContext(r.Context())
+		outcome := audit.OutcomeSucceeded
+		if tracked.status == http.StatusUnauthorized || tracked.status == http.StatusForbidden || (action == audit.ActionLogin && tracked.status == http.StatusConflict) {
+			outcome = audit.OutcomeDenied
+		} else if tracked.status >= 400 {
+			outcome = audit.OutcomeFailed
+		}
+		if outcome == audit.OutcomeSucceeded && !hasActor {
+			return
+		}
+		var actorPtr *auth.Actor
+		if hasActor {
+			actorPtr = &actor
+		}
+		reason := "http_" + strconv.Itoa(tracked.status)
+		event := audit.Event{OccurredAt: time.Now().UTC(), Actor: actorPtr, RequestID: RequestID(r.Context()), Action: action, Outcome: outcome, ReasonCode: reason}
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if action == audit.ActionPlanApply && len(parts) >= 4 {
+			event.PlanID = parts[3]
+		}
+		if (action == audit.ActionCredentialUpload || action == audit.ActionCredentialDelete) && len(parts) >= 4 {
+			event.TargetID = parts[3]
+		}
+		if err := recorder.Record(r.Context(), event); err != nil {
+			logger.ErrorContext(r.Context(), "Record security audit event", "action", action, "request_id", RequestID(r.Context()))
+		}
 	})
 }
 

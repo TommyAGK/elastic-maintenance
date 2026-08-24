@@ -18,11 +18,22 @@ import (
 	"time"
 
 	"github.com/TommyAGK/elastic-maintenance/internal/api"
+	"github.com/TommyAGK/elastic-maintenance/internal/audit"
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 	"github.com/TommyAGK/elastic-maintenance/internal/auth/authtest"
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
 	"golang.org/x/crypto/argon2"
 )
+
+type recordingAudit struct{ events []audit.Event }
+
+func (recorder *recordingAudit) Record(_ context.Context, event audit.Event) error {
+	if err := event.Validate(); err != nil {
+		return err
+	}
+	recorder.events = append(recorder.events, event)
+	return nil
+}
 
 type serverMappedSecrets map[string][]byte
 
@@ -38,6 +49,15 @@ type serverSessionSecrets struct{ contents []byte }
 
 func (secrets serverSessionSecrets) Read(context.Context, config.SecretKeyRef) ([]byte, error) {
 	return append([]byte{}, secrets.contents...), nil
+}
+
+type successfulBrowserAuth struct{}
+
+func (successfulBrowserAuth) BeginLogin(http.ResponseWriter, *http.Request) error       { return nil }
+func (successfulBrowserAuth) CompleteCallback(http.ResponseWriter, *http.Request) error { return nil }
+func (successfulBrowserAuth) Logout(w http.ResponseWriter, _ *http.Request) error {
+	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
 type conflictBrowserAuth struct{}
@@ -232,6 +252,73 @@ func TestProtectedRouteAuthenticationErrorsRemainGeneric(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/session", nil))
 	if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), "sensitive diagnostic") {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestEveryProtectedEndpointUsesTheCentralRoleMatrix(t *testing.T) {
+	routes := []struct {
+		method, path string
+		permission   auth.Permission
+	}{{"GET", "/api/v1/session", auth.PermissionSessionRead}, {"GET", "/api/v1/sources", auth.PermissionSourcesRead}, {"GET", "/api/v1/sources/source-1", auth.PermissionSourcesRead}, {"GET", "/api/v1/targets", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1/credential-status", auth.PermissionCredentialsRead}, {"PUT", "/api/v1/targets/target-1/credentials", auth.PermissionCredentialsWrite}, {"DELETE", "/api/v1/targets/target-1/credentials", auth.PermissionCredentialsWrite}, {"GET", "/api/v1/validations", auth.PermissionValidationsRead}, {"POST", "/api/v1/validations", auth.PermissionValidationsCreate}, {"GET", "/api/v1/validations/job-1", auth.PermissionValidationsRead}, {"GET", "/api/v1/plans", auth.PermissionPlansRead}, {"POST", "/api/v1/plans", auth.PermissionPlansCreate}, {"GET", "/api/v1/plans/plan-1", auth.PermissionPlansRead}, {"POST", "/api/v1/plans/plan-1/apply", auth.PermissionPlansApply}, {"GET", "/api/v1/jobs", auth.PermissionJobsRead}, {"GET", "/api/v1/jobs/job-1", auth.PermissionJobsRead}, {"GET", "/api/v1/reports", auth.PermissionReportsRead}, {"GET", "/api/v1/reports/report-1", auth.PermissionReportsRead}, {"GET", "/api/v1/audit", auth.PermissionAuditRead}}
+	for _, role := range auth.KnownRoles() {
+		actor := auth.Actor{Subject: "operator", Roles: []auth.Role{role}, Method: auth.MethodSession}
+		handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: actor}})
+		for _, route := range routes {
+			request := httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set(api.IdempotencyKeyHeader, "matrix-key")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			allowed := actor.HasPermission(route.permission)
+			if allowed && response.Code == http.StatusForbidden {
+				t.Errorf("role=%s %s %s unexpectedly denied", role, route.method, route.path)
+			}
+			if !allowed && response.Code != http.StatusForbidden {
+				t.Errorf("role=%s %s %s status=%d want403", role, route.method, route.path, response.Code)
+			}
+		}
+	}
+}
+
+func TestLogoutAuditIsRecordedExactlyOnce(t *testing.T) {
+	recorder := &recordingAudit{}
+	handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator", Roles: []auth.Role{auth.RoleViewer}}}, LogoutAuth: successfulBrowserAuth{}, AuditRecorder: recorder})
+	request := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || len(recorder.events) != 1 || recorder.events[0].Action != audit.ActionLogout || recorder.events[0].Outcome != audit.OutcomeSucceeded {
+		t.Fatalf("status=%d events=%#v", response.Code, recorder.events)
+	}
+}
+
+func TestMutationAuditHooksRecordActorActionAndOutcome(t *testing.T) {
+	recorder := &recordingAudit{}
+	backend := newPhaseOneBackend()
+	planner := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "planner", Roles: []auth.Role{auth.RolePlanner}}}, ValidationBackend: backend, AuditRecorder: recorder})
+	response := serveRequest(planner, http.MethodPost, "/api/v1/validations", `{}`, "audit-validation")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	viewer := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "viewer", Roles: []auth.Role{auth.RoleViewer}}}, ValidationBackend: backend, AuditRecorder: recorder})
+	response = serveRequest(viewer, http.MethodPost, "/api/v1/validations", `{}`, "audit-denied")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status=%d", response.Code)
+	}
+	response = serveRequest(planner, http.MethodPost, "/api/v1/plans", `{}`, "audit-plan")
+	if response.Code != http.StatusNotImplemented {
+		t.Fatalf("status=%d", response.Code)
+	}
+	if len(recorder.events) != 3 {
+		t.Fatalf("events=%#v", recorder.events)
+	}
+	if recorder.events[0].Action != audit.ActionValidationCreate || recorder.events[0].Outcome != audit.OutcomeSucceeded || recorder.events[0].Actor.Subject != "planner" {
+		t.Fatalf("success=%#v", recorder.events[0])
+	}
+	if recorder.events[1].Outcome != audit.OutcomeDenied || recorder.events[1].Actor.Subject != "viewer" {
+		t.Fatalf("denied=%#v", recorder.events[1])
+	}
+	if recorder.events[2].Action != audit.ActionPlanCreate || recorder.events[2].Outcome != audit.OutcomeFailed {
+		t.Fatalf("failed=%#v", recorder.events[2])
 	}
 }
 

@@ -35,6 +35,8 @@ var (
 	ErrAuthenticationConflict = errors.New("multiple authentication identities are not allowed")
 )
 
+type OIDCAuditFunc func(context.Context, Actor) error
+
 type BrowserOIDCOptions struct {
 	OIDC           config.OIDCConfig
 	Authorization  config.AuthorizationConfig
@@ -42,6 +44,7 @@ type BrowserOIDCOptions struct {
 	HTTPClient     *http.Client
 	Now            func() time.Time
 	TrustedProxies []string
+	Audit          OIDCAuditFunc
 }
 
 type BrowserOIDC struct {
@@ -56,6 +59,7 @@ type BrowserOIDC struct {
 	provider           *oidc.Provider
 	providerExpires    time.Time
 	providerRetryAfter time.Time
+	audit              OIDCAuditFunc
 }
 
 func NewBrowserOIDC(options BrowserOIDCOptions) (*BrowserOIDC, error) {
@@ -85,7 +89,7 @@ func NewBrowserOIDC(options BrowserOIDCOptions) (*BrowserOIDC, error) {
 		}
 		trusted = append(trusted, network)
 	}
-	return &BrowserOIDC{config: options.OIDC, authorization: options.Authorization, secrets: options.Secrets, cookies: newCookieCodec(keys, now), httpClient: client, now: now, trustedProxies: trusted}, nil
+	return &BrowserOIDC{config: options.OIDC, authorization: options.Authorization, secrets: options.Secrets, cookies: newCookieCodec(keys, now), httpClient: client, now: now, trustedProxies: trusted, audit: options.Audit}, nil
 }
 
 func (service *BrowserOIDC) Authenticate(request *http.Request) (Actor, error) {
@@ -237,6 +241,11 @@ func (service *BrowserOIDC) CompleteCallback(w http.ResponseWriter, request *htt
 	session, err := service.cookies.encode(request.Context(), "session", payload)
 	if err != nil {
 		return err
+	}
+	if service.audit != nil {
+		if err := service.audit(request.Context(), actor); err != nil {
+			return ErrOIDCUnavailable
+		}
 	}
 	setProtectedCookie(w, SessionCookieName, session, expires)
 	http.Redirect(w, request, "/", http.StatusSeeOther)

@@ -167,6 +167,16 @@ func TestBreakGlassAuditFailurePreventsSession(t *testing.T) {
 	if len(response.Result().Cookies()) != 0 || len(events) != 1 || events[0].Actor == nil {
 		t.Fatalf("cookies/events=%#v %#v", response.Result().Cookies(), events)
 	}
+	denied, err := NewBreakGlass(BreakGlassOptions{Config: cfg, Secrets: secrets, Audit: func(context.Context, BreakGlassAuditEvent) error { return errors.New("audit unavailable") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := httptest.NewRequest(http.MethodPost, "https://app.example.test/auth/break-glass/login", strings.NewReader(`{"username":"break-glass-admin","password":"wrong"}`))
+	wrong.Header.Set("Content-Type", "application/json")
+	wrong.Header.Set("Origin", "https://app.example.test")
+	if err := denied.Login(httptest.NewRecorder(), wrong); !errors.Is(err, ErrBreakGlassUnavailable) {
+		t.Fatalf("denied audit error=%v", err)
+	}
 }
 
 func TestBreakGlassLoginRejectsFormEncoding(t *testing.T) {
