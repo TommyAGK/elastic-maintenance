@@ -2,8 +2,11 @@ package kibana
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -11,6 +14,13 @@ func TestClientEndpointTrimsTrailingSlash(t *testing.T) {
 	cli := NewClient("http://example.com/", "k")
 	if got := cli.endpoint("/api/test"); got != "http://example.com/api/test" {
 		t.Fatalf("unexpected endpoint: %s", got)
+	}
+}
+
+func TestTargetResponseBodyIsBounded(t *testing.T) {
+	body := &boundedResponseBody{ReadCloser: io.NopCloser(strings.NewReader(strings.Repeat("x", int(maxTargetResponseBytes)+1))), remaining: maxTargetResponseBytes}
+	if _, err := io.ReadAll(body); !errors.Is(err, errTargetResponseTooLarge) {
+		t.Fatalf("error=%v", err)
 	}
 }
 

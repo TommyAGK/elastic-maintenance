@@ -662,6 +662,9 @@ func TestHTTPRuntimeServesAndShutsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := runtimeValue.(*HTTPRuntime)
+	if runtime.targetClients == nil {
+		t.Fatal("target client factory was not wired")
+	}
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- runtime.Serve() }()
 

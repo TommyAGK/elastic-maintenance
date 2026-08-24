@@ -24,6 +24,7 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
 	"github.com/TommyAGK/elastic-maintenance/internal/credentials"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
+	"github.com/TommyAGK/elastic-maintenance/internal/kibana"
 	"github.com/TommyAGK/elastic-maintenance/internal/kubesecret"
 	"github.com/TommyAGK/elastic-maintenance/internal/manifest"
 	"github.com/TommyAGK/elastic-maintenance/internal/secretmount"
@@ -94,11 +95,12 @@ type HandlerOptions struct {
 }
 
 type HTTPRuntime struct {
-	listener   net.Listener
-	server     *http.Server
-	validation *validation.Service
-	build      BuildInfo
-	ready      atomic.Bool
+	listener      net.Listener
+	server        *http.Server
+	validation    *validation.Service
+	targetClients *kibana.TargetClientFactory
+	build         BuildInfo
+	ready         atomic.Bool
 }
 
 func NewHTTPRuntime(cfg *config.ServerConfig, build BuildInfo) (Runtime, error) {
@@ -215,7 +217,14 @@ func newHTTPRuntime(
 		listener.Close()
 		return nil, fmt.Errorf("create credential service: %w", err)
 	}
-	runtime := &HTTPRuntime{listener: listener, validation: validationService, build: build.Normalized()}
+	targetClients, err := kibana.NewTargetClientFactory(kibana.TargetClientOptions{AcquireMaterial: func(ctx context.Context, targetID string) (kibana.CredentialMaterial, error) {
+		return credentialService.AcquireMaterial(ctx, targetID)
+	}})
+	if err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("create target client factory: %w", err)
+	}
+	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, build: build.Normalized()}
 	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)

@@ -27,6 +27,7 @@ const (
 	CertificateNotAfterAnnotation = "elastic-maintainer.tommyagk.github.io/certificate-not-after"
 	OperationAnnotation           = "elastic-maintainer.tommyagk.github.io/operation"
 	legacyRequestDigestAnnotation = "elastic-maintainer.tommyagk.github.io/request-digest"
+	maxReadableSecretDataBytes    = 512 << 10
 )
 
 var (
@@ -98,6 +99,16 @@ func (client *Client) Read(ctx context.Context, name, targetID string) (Material
 	secret, err := client.getOwnedTarget(ctx, name, targetID)
 	if err != nil {
 		return Material{}, err
+	}
+	if secret.Type != corev1.SecretTypeOpaque || len(secret.Data) > 16 {
+		return Material{}, ErrUnavailable
+	}
+	size := 0
+	for key, value := range secret.Data {
+		size += len(key) + len(value)
+		if size > maxReadableSecretDataBytes {
+			return Material{}, ErrUnavailable
+		}
 	}
 	return Material{Status: statusOf(secret), Data: cloneData(secret.Data)}, nil
 }

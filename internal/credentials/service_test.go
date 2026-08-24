@@ -23,6 +23,7 @@ type fixedUsage struct {
 	err   error
 }
 
+func (usage fixedUsage) Acquire(string) (func(), error) { return func() {}, usage.err }
 func (usage fixedUsage) DeleteIfUnused(_ context.Context, _ string, operation func() error) error {
 	if usage.err != nil {
 		return usage.err
@@ -44,12 +45,26 @@ type fakeStore struct {
 func (store *fakeStore) Status(context.Context, string, string) (kubesecret.Status, error) {
 	return store.status, store.statusErr
 }
+func (store *fakeStore) Read(context.Context, string, string) (kubesecret.Material, error) {
+	if store.statusErr != nil {
+		return kubesecret.Material{}, store.statusErr
+	}
+	return kubesecret.Material{Status: store.status, Data: cloneTestData(store.data)}, nil
+}
+func cloneTestData(input map[string][]byte) map[string][]byte {
+	result := map[string][]byte{}
+	for key, value := range input {
+		result[key] = append([]byte{}, value...)
+	}
+	return result
+}
 func (store *fakeStore) Upsert(_ context.Context, _ string, _ string, data map[string][]byte, metadata kubesecret.WriteMetadata) (kubesecret.Status, error) {
 	store.upserts++
 	store.data = map[string][]byte{}
 	for key, value := range data {
 		store.data[key] = append([]byte{}, value...)
 	}
+	store.data[kubesecret.RequestDigestDataKey] = []byte(metadata.RequestDigest)
 	store.metadata = metadata
 	if store.upsertErr != nil {
 		return kubesecret.Status{}, store.upsertErr
@@ -63,7 +78,7 @@ func (store *fakeStore) Delete(context.Context, string, string) error {
 	return store.deleteErr
 }
 func credentialConfig() *config.ServerConfig {
-	return &config.ServerConfig{StateID: "state", SecretPolicy: config.KubernetesSecretPolicy{Namespace: "ns", NamePrefix: "target-"}, Targets: map[string]config.TargetConfig{"prod": {CredentialSecret: config.SecretReference{Namespace: "ns", Name: "target-prod"}}}}
+	return &config.ServerConfig{StateID: "state", SecretPolicy: config.KubernetesSecretPolicy{Namespace: "ns", NamePrefix: "target-"}, Targets: map[string]config.TargetConfig{"prod": {URL: "https://kibana.example.test", CredentialSecret: config.SecretReference{Namespace: "ns", Name: "target-prod"}}}}
 }
 func administrator() auth.Actor {
 	return auth.Actor{Subject: "admin", Roles: []auth.Role{auth.RoleAdministrator}, Method: auth.MethodOIDC}
@@ -142,6 +157,66 @@ func TestPermissionTargetsStatusAndDelete(t *testing.T) {
 	}
 	if _, err := service.Delete(context.Background(), "prod", "delete-request", administrator()); err != nil || store.deletes != 1 {
 		t.Fatalf("delete err=%v calls=%d", err, store.deletes)
+	}
+}
+
+func TestAcquireMaterialValidatesAndLeasesOwnedCredential(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeStore{statusErr: kubesecret.ErrNotFound}
+	service := newCredentialService(t, store, now)
+	if _, err := service.Put(context.Background(), "prod", "upload-key", administrator(), PutRequest{APIKey: "material-key"}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := service.AcquireMaterial(context.Background(), "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(lease.APIKey()) != "material-key" || lease.TargetIdentity().URL != "https://kibana.example.test" {
+		t.Fatal("invalid leased material")
+	}
+	if _, err := service.Delete(context.Background(), "prod", "delete-key", administrator()); !errors.Is(err, ErrInUse) {
+		t.Fatalf("delete error=%v", err)
+	}
+	lease.Close()
+	if len(lease.apiKey) != 0 {
+		t.Fatal("lease key retained after close")
+	}
+	if _, err := service.Delete(context.Background(), "prod", "delete-key-2", administrator()); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestAcquireMaterialCertificatesSurviveSourceBufferClearing(t *testing.T) {
+	now := time.Now().UTC()
+	bundle, _ := testCA(t, now, true)
+	store := &fakeStore{statusErr: kubesecret.ErrNotFound}
+	service := newCredentialService(t, store, now)
+	if _, err := service.Put(context.Background(), "prod", "ca-upload", administrator(), PutRequest{APIKey: "material-key", CACertificatePEM: string(bundle)}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := service.AcquireMaterial(context.Background(), "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	certificates := lease.CACertificates()
+	if len(certificates) != 1 || len(certificates[0].Raw) == 0 {
+		t.Fatal("leased CA certificate was cleared with source material")
+	}
+	if _, err := x509.ParseCertificate(certificates[0].Raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAcquireMaterialRejectsTamperingWithoutReturningValues(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeStore{statusErr: kubesecret.ErrNotFound}
+	service := newCredentialService(t, store, now)
+	if _, err := service.Put(context.Background(), "prod", "upload-key", administrator(), PutRequest{APIKey: "material-key"}); err != nil {
+		t.Fatal(err)
+	}
+	store.data[APIKeyDataKey] = []byte("tampered-key")
+	if _, err := service.AcquireMaterial(context.Background(), "prod"); !errors.Is(err, ErrTargetUnready) || strings.Contains(err.Error(), "tampered") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

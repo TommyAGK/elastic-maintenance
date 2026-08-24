@@ -34,6 +34,7 @@ var (
 	ErrConflict            = errors.New("credential operation conflicted")
 	ErrInUse               = errors.New("credential is in use")
 	ErrUnavailable         = errors.New("credential service is unavailable")
+	ErrTargetUnready       = errors.New("target credentials are not ready")
 )
 
 type ConfigSource interface {
@@ -47,34 +48,50 @@ func (function ConfigSourceFunc) Load(ctx context.Context) (*config.ServerConfig
 
 type Store interface {
 	Status(context.Context, string, string) (kubesecret.Status, error)
+	Read(context.Context, string, string) (kubesecret.Material, error)
 	Upsert(context.Context, string, string, map[string][]byte, kubesecret.WriteMetadata) (kubesecret.Status, error)
 	Delete(context.Context, string, string) error
 }
 type StoreFactory func(*config.ServerConfig) (Store, error)
 type UsageCoordinator interface {
+	Acquire(string) (func(), error)
 	DeleteIfUnused(context.Context, string, func() error) error
 }
-type UsageTracker struct {
+type usageEntry struct {
 	mu     sync.Mutex
-	active map[string]int
+	active int
+}
+type UsageTracker struct {
+	mu      sync.Mutex
+	entries map[string]*usageEntry
 }
 
-func NewUsageTracker() *UsageTracker { return &UsageTracker{active: map[string]int{}} }
+func NewUsageTracker() *UsageTracker { return &UsageTracker{entries: map[string]*usageEntry{}} }
+func (tracker *UsageTracker) entry(targetID string) *usageEntry {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	entry := tracker.entries[targetID]
+	if entry == nil {
+		entry = &usageEntry{}
+		tracker.entries[targetID] = entry
+	}
+	return entry
+}
 func (tracker *UsageTracker) Acquire(targetID string) (func(), error) {
 	if !idValue(targetID) {
 		return nil, ErrTargetNotFound
 	}
-	tracker.mu.Lock()
-	tracker.active[targetID]++
-	tracker.mu.Unlock()
+	entry := tracker.entry(targetID)
+	entry.mu.Lock()
+	entry.active++
+	entry.mu.Unlock()
 	once := sync.Once{}
 	return func() {
 		once.Do(func() {
-			tracker.mu.Lock()
-			defer tracker.mu.Unlock()
-			tracker.active[targetID]--
-			if tracker.active[targetID] <= 0 {
-				delete(tracker.active, targetID)
+			entry.mu.Lock()
+			defer entry.mu.Unlock()
+			if entry.active > 0 {
+				entry.active--
 			}
 		})
 	}, nil
@@ -83,9 +100,10 @@ func (tracker *UsageTracker) DeleteIfUnused(ctx context.Context, targetID string
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
-	if tracker.active[targetID] > 0 {
+	entry := tracker.entry(targetID)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.active > 0 {
 		return ErrInUse
 	}
 	return operation()
@@ -133,6 +151,135 @@ func New(options Options) (*Service, error) {
 	}
 	return &Service{config: options.Config, store: options.Store, factory: options.StoreFactory, usage: usage, now: now}, nil
 }
+
+type MaterialLease struct {
+	identity     config.TargetIdentity
+	apiKey       []byte
+	certificates []*x509.Certificate
+	release      func()
+	once         sync.Once
+}
+
+func (lease *MaterialLease) TargetIdentity() config.TargetIdentity {
+	if lease == nil {
+		return config.TargetIdentity{}
+	}
+	return lease.identity
+}
+func (lease *MaterialLease) APIKey() []byte {
+	if lease == nil {
+		return nil
+	}
+	return append([]byte{}, lease.apiKey...)
+}
+func (lease *MaterialLease) CACertificates() []*x509.Certificate {
+	if lease == nil {
+		return nil
+	}
+	return append([]*x509.Certificate{}, lease.certificates...)
+}
+func (lease *MaterialLease) Close() {
+	if lease == nil {
+		return
+	}
+	lease.once.Do(func() {
+		clear(lease.apiKey)
+		lease.apiKey = nil
+		lease.certificates = nil
+		if lease.release != nil {
+			lease.release()
+		}
+	})
+}
+func (service *Service) AcquireMaterial(ctx context.Context, targetID string) (*MaterialLease, error) {
+	cfg, target, store, err := service.inputs(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	identity, err := cfg.TargetIdentity(targetID)
+	if err != nil {
+		return nil, ErrTargetUnready
+	}
+	release, err := service.usage.Acquire(targetID)
+	if err != nil {
+		return nil, ErrTargetUnready
+	}
+	success := false
+	defer func() {
+		if !success {
+			release()
+		}
+	}()
+	material, err := store.Read(ctx, target.CredentialSecret.Name, targetID)
+	if err == nil {
+		defer clearMaterialData(material.Data)
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, ErrTargetUnready
+	}
+	if !validStoredStatus(material.Status) || !validMaterialData(material, service.now().UTC()) {
+		return nil, ErrTargetUnready
+	}
+	apiKey := append([]byte{}, material.Data[APIKeyDataKey]...)
+	certificates, err := parseValidatedCertificates(material.Data[CACertificateDataKey], service.now().UTC())
+	if err != nil {
+		clear(apiKey)
+		return nil, ErrTargetUnready
+	}
+	success = true
+	return &MaterialLease{identity: identity, apiKey: apiKey, certificates: certificates, release: release}, nil
+}
+func clearMaterialData(data map[string][]byte) {
+	for key, value := range data {
+		clear(value)
+		delete(data, key)
+	}
+}
+func validMaterialData(material kubesecret.Material, now time.Time) bool {
+	for key := range material.Data {
+		if key != APIKeyDataKey && key != CACertificateDataKey && key != kubesecret.RequestDigestDataKey {
+			return false
+		}
+	}
+	apiKey := material.Data[APIKeyDataKey]
+	if len(apiKey) == 0 || len(apiKey) > MaxAPIKeyBytes || !printableAPIKey(apiKey) {
+		return false
+	}
+	ca := material.Data[CACertificateDataKey]
+	if len(ca) > MaxCABundleBytes || credentialDigest(apiKey, ca) != material.Status.RequestDigest {
+		return false
+	}
+	validated, hash, expiry, err := validateCA(ca, now)
+	clear(validated)
+	return err == nil && hash == material.Status.CertificateSHA256 && expiry.Equal(material.Status.CertificateNotAfter)
+}
+func parseValidatedCertificates(contents []byte, now time.Time) ([]*x509.Certificate, error) {
+	if len(contents) == 0 {
+		return nil, nil
+	}
+	validated, _, _, err := validateCA(contents, now)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(validated)
+	contents = validated
+	var certificates []*x509.Certificate
+	for len(contents) > 0 {
+		block, rest := pem.Decode(contents)
+		der := append([]byte{}, block.Bytes...)
+		certificate, err := x509.ParseCertificate(der)
+		if err != nil {
+			return nil, err
+		}
+		certificates = append(certificates, certificate)
+		contents = rest
+	}
+	return certificates, nil
+}
+
 func (service *Service) OriginConfig(ctx context.Context) (string, []string, error) {
 	cfg, err := service.config.Load(ctx)
 	if err != nil || cfg == nil {
@@ -207,6 +354,7 @@ func (service *Service) Put(ctx context.Context, targetID, idempotencyKey string
 	}
 	creating := errors.Is(currentErr, kubesecret.ErrNotFound)
 	data := map[string][]byte{APIKeyDataKey: append([]byte{}, apiKey...)}
+	defer clearMaterialData(data)
 	if len(ca) != 0 {
 		data[CACertificateDataKey] = ca
 	}

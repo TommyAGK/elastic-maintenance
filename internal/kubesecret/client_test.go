@@ -131,6 +131,20 @@ func TestCreateUpdateReadAndDeleteOwnedSecret(t *testing.T) {
 	}
 }
 
+func TestReadRejectsNonOpaqueAndOversizedMaterial(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "elastic-maintainer", Name: "elastic-maintainer-target-prod", Labels: map[string]string{ManagedByLabel: ManagedByValue}, Annotations: map[string]string{StateIDAnnotation: "state-1", TargetIDAnnotation: "prod"}}, Type: corev1.SecretTypeTLS, Data: map[string][]byte{"api-key": []byte("value")}}
+	backend := &fakeAPI{secret: secret}
+	client, _ := New(Options{Namespace: "elastic-maintainer", NamePrefix: "elastic-maintainer-target-", StateID: "state-1", API: backend})
+	if _, err := client.Read(context.Background(), secret.Name, "prod"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("type error=%v", err)
+	}
+	secret.Type = corev1.SecretTypeOpaque
+	secret.Data = map[string][]byte{"oversized": make([]byte, maxReadableSecretDataBytes+1)}
+	if _, err := client.Read(context.Background(), secret.Name, "prod"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("size error=%v", err)
+	}
+}
+
 func TestRefusesInvalidUnownedAndCrossTargetSecretsBeforeMutation(t *testing.T) {
 	owned := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "elastic-maintainer", Name: "elastic-maintainer-target-prod", ResourceVersion: "1", Labels: map[string]string{ManagedByLabel: ManagedByValue}, Annotations: map[string]string{StateIDAnnotation: "other-state", TargetIDAnnotation: "prod"}}}
 	backend := &fakeAPI{secret: owned}
