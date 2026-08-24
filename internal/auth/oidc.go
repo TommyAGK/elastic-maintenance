@@ -113,6 +113,7 @@ func (service *BrowserOIDC) Authenticate(request *http.Request) (Actor, error) {
 	}
 	payload.Actor.Method = payload.Method
 	actor, err := payload.Actor.Normalized()
+	actor.CSRFToken = payload.CSRFToken
 	actor.SessionExpiresAt = time.Unix(payload.ExpiresAt, 0).UTC()
 	if err != nil || actor.Method != MethodOIDC {
 		return Actor{}, ErrInvalidAuthentication
@@ -237,7 +238,11 @@ func (service *BrowserOIDC) CompleteCallback(w http.ResponseWriter, request *htt
 	if !expires.After(now) {
 		return ErrInvalidAuthentication
 	}
-	payload := sessionPayload{Version: "v1", Actor: actor, Method: actor.Method, IssuedAt: now.Unix(), ExpiresAt: expires.Unix()}
+	csrf, err := randomURLValue(32)
+	if err != nil {
+		return err
+	}
+	payload := sessionPayload{Version: "v1", Actor: actor, Method: actor.Method, CSRFToken: csrf, IssuedAt: now.Unix(), ExpiresAt: expires.Unix()}
 	session, err := service.cookies.encode(request.Context(), "session", payload)
 	if err != nil {
 		return err

@@ -384,11 +384,16 @@ func (service *BreakGlassService) authenticateCredentials(ctx context.Context, s
 
 	now := service.now().UTC()
 	expires := now.Add(BreakGlassSessionLifetime)
+	csrf, csrfErr := randomURLValue(32)
+	if csrfErr != nil {
+		return "", time.Time{}, ErrBreakGlassAuthenticationFailed
+	}
 	payload := sessionPayload{
 		Version:   "v1",
 		Actor:     Actor{Subject: state.config.BreakGlass.Username, Roles: []Role{RoleAdministrator}, Method: MethodBreakGlass},
 		Method:    MethodBreakGlass,
 		Revision:  state.revision,
+		CSRFToken: csrf,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: expires.Unix(),
 	}
@@ -433,6 +438,7 @@ func (service *BreakGlassService) Authenticate(request *http.Request) (Actor, er
 	}
 	payload.Actor.Method = payload.Method
 	actor, err := payload.Actor.Normalized()
+	actor.CSRFToken = payload.CSRFToken
 	actor.SessionExpiresAt = time.Unix(payload.ExpiresAt, 0).UTC()
 	if err != nil || actor.Method != MethodBreakGlass || len(actor.Roles) != 1 || actor.Roles[0] != RoleAdministrator || !constantTimeEqual(actor.Subject, state.config.BreakGlass.Username) {
 		return Actor{}, ErrInvalidAuthentication

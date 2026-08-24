@@ -27,6 +27,7 @@ type SessionResponse struct {
 	AuthenticationMethod auth.Method `json:"authenticationMethod"`
 	Actor                auth.Actor  `json:"actor"`
 	ExpiresAt            *time.Time  `json:"expiresAt,omitempty"`
+	CSRFToken            string      `json:"csrfToken,omitempty"`
 }
 
 func WriteJSON(w http.ResponseWriter, request *http.Request, status int, value any) {

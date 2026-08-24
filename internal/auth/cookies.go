@@ -216,6 +216,7 @@ type sessionPayload struct {
 	Actor     Actor  `json:"actor"`
 	Method    Method `json:"method"`
 	Revision  string `json:"rev,omitempty"`
+	CSRFToken string `json:"csrf,omitempty"`
 	IssuedAt  int64  `json:"iat"`
 	ExpiresAt int64  `json:"exp"`
 }

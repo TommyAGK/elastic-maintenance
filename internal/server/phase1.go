@@ -158,9 +158,9 @@ func targetCollectionHandler(backend ValidationBackend) http.Handler {
 	})
 }
 
-func targetPhaseOneHandler(backend ValidationBackend, authorizer auth.Authorizer) http.Handler {
+func targetPhaseOneHandler(backend ValidationBackend, authorizer auth.Authorizer, credentials CredentialBackend, publicURL string, trustedProxies []string) http.Handler {
 	detail := authorize(authorizer, auth.PermissionTargetsRead, targetDetailHandler(backend))
-	fallback := targetSubresourceHandler(authorizer)
+	fallback := targetSubresourceHandler(authorizer, credentials, publicURL, trustedProxies)
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/targets/")
 		if remainder != "" && !strings.Contains(remainder, "/") {

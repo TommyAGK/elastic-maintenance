@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 var (
@@ -59,9 +60,13 @@ type Actor struct {
 	Roles            []Role    `json:"roles"`
 	Method           Method    `json:"-"`
 	SessionExpiresAt time.Time `json:"-"`
+	CSRFToken        string    `json:"-"`
 }
 
 func (actor Actor) Normalized() (Actor, error) {
+	if strings.IndexFunc(actor.Subject, unicode.IsControl) >= 0 || strings.IndexFunc(actor.DisplayName, unicode.IsControl) >= 0 {
+		return Actor{}, ErrInvalidAuthentication
+	}
 	actor.Subject = strings.TrimSpace(actor.Subject)
 	actor.DisplayName = strings.TrimSpace(actor.DisplayName)
 	if actor.Subject == "" {

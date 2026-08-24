@@ -347,13 +347,22 @@
               }
             }
           },
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
-          },
           "409": {
             "$ref": "#/components/responses/APIError"
           },
           "503": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -368,6 +377,9 @@
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
           }
         ],
         "requestBody": {
@@ -391,13 +403,31 @@
               }
             }
           },
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
-          },
           "409": {
             "$ref": "#/components/responses/APIError"
           },
           "503": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "413": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "415": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "422": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -410,6 +440,9 @@
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
           }
         ],
         "requestBody": {
@@ -433,13 +466,28 @@
               }
             }
           },
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
-          },
           "409": {
             "$ref": "#/components/responses/APIError"
           },
           "503": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "413": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "415": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
             "$ref": "#/components/responses/APIError"
           }
         }
@@ -1087,6 +1135,17 @@
           "minLength": 1,
           "maxLength": 512
         }
+      },
+      "CSRFToken": {
+        "name": "X-CSRF-Token",
+        "in": "header",
+        "required": false,
+        "description": "Required for browser-session credential mutations; omitted for bearer automation.",
+        "schema": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 128
+        }
       }
     },
     "responses": {
@@ -1217,6 +1276,12 @@
           "expiresAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "csrfToken": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 128,
+            "description": "Ephemeral browser CSRF token; do not persist."
           }
         }
       },
@@ -1286,7 +1351,8 @@
             "minLength": 1,
             "maxLength": 16384,
             "writeOnly": true,
-            "format": "password"
+            "format": "password",
+            "pattern": "^[!-~]+$"
           },
           "caCertificatePem": {
             "type": "string",

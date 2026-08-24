@@ -122,6 +122,7 @@ func TestOpenAPIUnfinishedRoutesAreExplicit(t *testing.T) {
 		"GET /health/live": true, "GET /health/ready": true, "GET /auth/login": true, "GET /auth/callback": true, "POST /auth/logout": true, "POST /auth/break-glass/login": true, "GET /api/v1/openapi.json": true, "GET /api/v1/session": true,
 		"GET /api/v1/sources": true, "GET /api/v1/sources/{sourceId}": true,
 		"GET /api/v1/targets": true, "GET /api/v1/targets/{targetId}": true,
+		"GET /api/v1/targets/{targetId}/credential-status": true, "PUT /api/v1/targets/{targetId}/credentials": true, "DELETE /api/v1/targets/{targetId}/credentials": true,
 		"GET /api/v1/validations": true, "POST /api/v1/validations": true, "GET /api/v1/validations/{jobId}": true,
 	}
 	for path, rawPathItem := range paths {

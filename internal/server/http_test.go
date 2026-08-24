@@ -22,8 +22,30 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 	"github.com/TommyAGK/elastic-maintenance/internal/auth/authtest"
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/credentials"
 	"golang.org/x/crypto/argon2"
 )
+
+type fakeCredentialBackend struct {
+	status      credentials.Status
+	err         error
+	put         credentials.PutRequest
+	target, key string
+	actor       auth.Actor
+	deleted     bool
+}
+
+func (backend *fakeCredentialBackend) Status(context.Context, string) (credentials.Status, error) {
+	return backend.status, backend.err
+}
+func (backend *fakeCredentialBackend) Put(_ context.Context, target, key string, actor auth.Actor, request credentials.PutRequest) (credentials.Status, error) {
+	backend.target, backend.key, backend.actor, backend.put = target, key, actor, request
+	return backend.status, backend.err
+}
+func (backend *fakeCredentialBackend) Delete(_ context.Context, target, key string, actor auth.Actor) (credentials.Status, error) {
+	backend.target, backend.key, backend.actor, backend.deleted = target, key, actor, true
+	return backend.status, backend.err
+}
 
 type recordingAudit struct{ events []audit.Event }
 
@@ -255,6 +277,106 @@ func TestProtectedRouteAuthenticationErrorsRemainGeneric(t *testing.T) {
 	}
 }
 
+func TestCredentialEndpointsEnforceContractOriginRBACAndNoReadback(t *testing.T) {
+	rotated := time.Now().UTC()
+	backend := &fakeCredentialBackend{status: credentials.Status{Configured: true, SecretResourceVersion: "7", RotatedAt: rotated, RotatedBy: "admin"}}
+	admin := auth.Actor{Subject: "admin", Roles: []auth.Role{auth.RoleAdministrator}, Method: auth.MethodOIDC, CSRFToken: "csrf-token"}
+	handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: admin}, CredentialBackend: backend, PublicURL: "https://app.example.test"})
+	put := httptest.NewRequest(http.MethodPut, "https://app.example.test/api/v1/targets/prod/credentials", strings.NewReader(`{"apiKey":"credential-sentinel"}`))
+	put.Header.Set("Content-Type", "application/json")
+	put.Header.Set("Origin", "https://app.example.test")
+	put.Header.Set(api.CSRFTokenHeader, "csrf-token")
+	put.Header.Set(api.IdempotencyKeyHeader, "credential-request")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, put)
+	if response.Code != http.StatusOK || backend.target != "prod" || backend.key != "credential-request" || backend.put.APIKey != "credential-sentinel" || strings.Contains(response.Body.String(), "credential-sentinel") {
+		t.Fatalf("status=%d body=%s backend=%#v", response.Code, response.Body.String(), backend)
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/targets/prod/credential-status", nil)
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"secretResourceVersion":"7"`) {
+		t.Fatalf("status response=%d %s", statusResponse.Code, statusResponse.Body.String())
+	}
+	missingCSRF := httptest.NewRequest(http.MethodPut, "https://app.example.test/api/v1/targets/prod/credentials", strings.NewReader(`{"apiKey":"x"}`))
+	missingCSRF.Header.Set("Content-Type", "application/json")
+	missingCSRF.Header.Set("Origin", "https://app.example.test")
+	missingCSRF.Header.Set(api.IdempotencyKeyHeader, "missing-csrf")
+	missingCSRFResponse := httptest.NewRecorder()
+	handler.ServeHTTP(missingCSRFResponse, missingCSRF)
+	if missingCSRFResponse.Code != http.StatusBadRequest {
+		t.Fatalf("missing CSRF status=%d", missingCSRFResponse.Code)
+	}
+	bearerActor := auth.Actor{Subject: "automation", Roles: []auth.Role{auth.RoleAdministrator}, Method: auth.MethodBearer}
+	bearerHandler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: bearerActor}, CredentialBackend: backend, PublicURL: "https://app.example.test"})
+	bearerRequest := httptest.NewRequest(http.MethodPut, "https://app.example.test/api/v1/targets/prod/credentials", strings.NewReader(`{"apiKey":"bearer-value"}`))
+	bearerRequest.Header.Set("Content-Type", "application/json")
+	bearerRequest.Header.Set(api.IdempotencyKeyHeader, "bearer-request")
+	bearerResponse := httptest.NewRecorder()
+	bearerHandler.ServeHTTP(bearerResponse, bearerRequest)
+	if bearerResponse.Code != http.StatusOK {
+		t.Fatalf("bearer status=%d body=%s", bearerResponse.Code, bearerResponse.Body.String())
+	}
+	proxyHandler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: admin}, CredentialBackend: backend, PublicURL: "https://app.example.test", TrustedProxies: []string{"10.0.0.0/8"}})
+	proxyRequest := httptest.NewRequest(http.MethodPut, "http://internal/api/v1/targets/prod/credentials", strings.NewReader(`{"apiKey":"proxy-value"}`))
+	proxyRequest.RemoteAddr = "10.0.0.2:1234"
+	proxyRequest.Header.Set("X-Forwarded-Proto", "https")
+	proxyRequest.Header.Set("X-Forwarded-Host", "app.example.test")
+	proxyRequest.Header.Set("Origin", "https://app.example.test")
+	proxyRequest.Header.Set(api.CSRFTokenHeader, "csrf-token")
+	proxyRequest.Header.Set("Content-Type", "application/json")
+	proxyRequest.Header.Set(api.IdempotencyKeyHeader, "proxy-request")
+	proxyResponse := httptest.NewRecorder()
+	proxyHandler.ServeHTTP(proxyResponse, proxyRequest)
+	if proxyResponse.Code != http.StatusOK {
+		t.Fatalf("proxy status=%d body=%s", proxyResponse.Code, proxyResponse.Body.String())
+	}
+	badOrigin := httptest.NewRequest(http.MethodPut, "https://app.example.test/api/v1/targets/prod/credentials", strings.NewReader(`{"apiKey":"x"}`))
+	badOrigin.Header.Set("Content-Type", "application/json")
+	badOrigin.Header.Set(api.IdempotencyKeyHeader, "bad-origin")
+	badResponse := httptest.NewRecorder()
+	handler.ServeHTTP(badResponse, badOrigin)
+	if badResponse.Code != http.StatusBadRequest {
+		t.Fatalf("missing origin status=%d", badResponse.Code)
+	}
+	viewer := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "viewer", Roles: []auth.Role{auth.RoleViewer}, Method: auth.MethodOIDC}}, CredentialBackend: backend, PublicURL: "https://app.example.test"})
+	denied := httptest.NewRecorder()
+	viewer.ServeHTTP(denied, put.Clone(context.Background()))
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("viewer status=%d", denied.Code)
+	}
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "https://app.example.test/api/v1/targets/prod/credentials", strings.NewReader(`{"confirm":true}`))
+	deleteRequest.Header.Set("Content-Type", "application/json")
+	deleteRequest.Header.Set("Origin", "https://app.example.test")
+	deleteRequest.Header.Set(api.CSRFTokenHeader, "csrf-token")
+	deleteRequest.Header.Set(api.IdempotencyKeyHeader, "delete-request")
+	deleted := httptest.NewRecorder()
+	handler.ServeHTTP(deleted, deleteRequest)
+	if deleted.Code != http.StatusOK || !backend.deleted {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+}
+
+func TestCredentialMutationRejectsMalformedLivePublicOrigins(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPut, "https://app.example.test/api/v1/targets/prod/credentials", nil)
+	request = request.WithContext(auth.WithActor(request.Context(), auth.Actor{Subject: "automation", Roles: []auth.Role{auth.RoleAdministrator}, Method: auth.MethodBearer}))
+	for _, publicURL := range []string{"https://:443", "https://app.example.test:", "https://app.example.test:99999", "http://app.example.test"} {
+		if validCredentialMutationOrigin(request, publicURL, nil) {
+			t.Errorf("publicURL %q accepted", publicURL)
+		}
+	}
+}
+
+func TestCredentialEndpointErrorsAreGeneric(t *testing.T) {
+	backend := &fakeCredentialBackend{err: errors.New("credential-value-must-not-escape")}
+	handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "viewer", Roles: []auth.Role{auth.RoleViewer}}}, CredentialBackend: backend})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/targets/prod/credential-status", nil))
+	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "credential-value") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestEveryProtectedEndpointUsesTheCentralRoleMatrix(t *testing.T) {
 	routes := []struct {
 		method, path string
@@ -288,6 +410,27 @@ func TestLogoutAuditIsRecordedExactlyOnce(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || len(recorder.events) != 1 || recorder.events[0].Action != audit.ActionLogout || recorder.events[0].Outcome != audit.OutcomeSucceeded {
 		t.Fatalf("status=%d events=%#v", response.Code, recorder.events)
+	}
+}
+
+func TestCredentialAuditDistinguishesUploadAndRotation(t *testing.T) {
+	recorder := &recordingAudit{}
+	backend := &fakeCredentialBackend{status: credentials.Status{Configured: true, Created: true, SecretResourceVersion: "1"}}
+	actor := auth.Actor{Subject: "admin", Roles: []auth.Role{auth.RoleAdministrator}, Method: auth.MethodOIDC, CSRFToken: "csrf"}
+	handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: actor}, CredentialBackend: backend, PublicURL: "https://app.example.test", AuditRecorder: recorder})
+	request := func(key string) *http.Request {
+		item := httptest.NewRequest(http.MethodPut, "https://app.example.test/api/v1/targets/prod/credentials", strings.NewReader(`{"apiKey":"value"}`))
+		item.Header.Set("Content-Type", "application/json")
+		item.Header.Set("Origin", "https://app.example.test")
+		item.Header.Set(api.CSRFTokenHeader, "csrf")
+		item.Header.Set(api.IdempotencyKeyHeader, key)
+		return item
+	}
+	handler.ServeHTTP(httptest.NewRecorder(), request("upload-key"))
+	backend.status.Created = false
+	handler.ServeHTTP(httptest.NewRecorder(), request("rotate-key"))
+	if len(recorder.events) != 2 || recorder.events[0].Action != audit.ActionCredentialUpload || recorder.events[1].Action != audit.ActionCredentialRotate || recorder.events[1].TargetID != "prod" {
+		t.Fatalf("events=%#v", recorder.events)
 	}
 }
 

@@ -22,7 +22,9 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/audit"
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
+	"github.com/TommyAGK/elastic-maintenance/internal/credentials"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
+	"github.com/TommyAGK/elastic-maintenance/internal/kubesecret"
 	"github.com/TommyAGK/elastic-maintenance/internal/manifest"
 	"github.com/TommyAGK/elastic-maintenance/internal/secretmount"
 	"github.com/TommyAGK/elastic-maintenance/internal/validation"
@@ -40,6 +42,24 @@ const (
 )
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+type unavailableCredentialBackend struct{}
+
+func (unavailableCredentialBackend) Status(context.Context, string) (credentials.Status, error) {
+	return credentials.Status{}, credentials.ErrUnavailable
+}
+func (unavailableCredentialBackend) Put(context.Context, string, string, auth.Actor, credentials.PutRequest) (credentials.Status, error) {
+	return credentials.Status{}, credentials.ErrUnavailable
+}
+func (unavailableCredentialBackend) Delete(context.Context, string, string, auth.Actor) (credentials.Status, error) {
+	return credentials.Status{}, credentials.ErrUnavailable
+}
+
+type CredentialBackend interface {
+	Status(context.Context, string) (credentials.Status, error)
+	Put(context.Context, string, string, auth.Actor, credentials.PutRequest) (credentials.Status, error)
+	Delete(context.Context, string, string, auth.Actor) (credentials.Status, error)
+}
 
 type ValidationBackend interface {
 	Start(context.Context, validation.StartRequest) (jobs.Job, error)
@@ -68,6 +88,9 @@ type HandlerOptions struct {
 	AuditRecorder     audit.Recorder
 	BreakGlassAuth    BreakGlassAuthenticator
 	ValidationBackend ValidationBackend
+	CredentialBackend CredentialBackend
+	PublicURL         string
+	TrustedProxies    []string
 }
 
 type HTTPRuntime struct {
@@ -174,8 +197,26 @@ func newHTTPRuntime(
 		listener.Close()
 		return nil, fmt.Errorf("create validation service: %w", err)
 	}
+	credentialUsage := credentials.NewUsageTracker()
+	credentialService, err := credentials.New(credentials.Options{Usage: credentialUsage, Config: credentials.ConfigSourceFunc(func(ctx context.Context) (*config.ServerConfig, error) {
+		live, loadErr := config.LoadServerConfig(cfg.RuntimeConfigPath())
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		overrides := cfg.StartupOverrides()
+		if overrides.PublicURLOverride != "" {
+			live.PublicURL = overrides.PublicURLOverride
+		}
+		return live, nil
+	}), StoreFactory: func(live *config.ServerConfig) (credentials.Store, error) {
+		return kubesecret.NewInCluster(live.SecretPolicy, live.StateID)
+	}})
+	if err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("create credential service: %w", err)
+	}
 	runtime := &HTTPRuntime{listener: listener, validation: validationService, build: build.Normalized()}
-	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit}
+	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)
 		handlerOptions.Authenticator = auth.NewRequestAuthenticator(sessions, bearerAuth)
@@ -243,6 +284,9 @@ func NewHandler(options HandlerOptions) http.Handler {
 	if options.ValidationBackend == nil {
 		options.ValidationBackend = unavailableValidationBackend{}
 	}
+	if options.CredentialBackend == nil {
+		options.CredentialBackend = unavailableCredentialBackend{}
+	}
 	auditRecorder := options.AuditRecorder
 	if auditRecorder == nil {
 		auditRecorder = audit.NopRecorder{}
@@ -291,14 +335,14 @@ func NewHandler(options HandlerOptions) http.Handler {
 		protectedMux.Handle("/api/v1/sources", authorize(authorizer, auth.PermissionSourcesRead, readPlaceholder("source inventory")))
 		protectedMux.Handle("/api/v1/sources/", detailReadHandler("/api/v1/sources/", authorizer, auth.PermissionSourcesRead, "source inventory"))
 		protectedMux.Handle("/api/v1/targets", authorize(authorizer, auth.PermissionTargetsRead, readPlaceholder("target inventory")))
-		protectedMux.Handle("/api/v1/targets/", targetSubresourceHandler(authorizer))
+		protectedMux.Handle("/api/v1/targets/", targetSubresourceHandler(authorizer, options.CredentialBackend, options.PublicURL, options.TrustedProxies))
 		protectedMux.Handle("/api/v1/validations", jobCollectionHandler(authorizer, auth.PermissionValidationsRead, auth.PermissionValidationsCreate, "validation"))
 		protectedMux.Handle("/api/v1/validations/", detailReadHandler("/api/v1/validations/", authorizer, auth.PermissionValidationsRead, "validation job"))
 	} else {
 		protectedMux.Handle("/api/v1/sources", authorize(authorizer, auth.PermissionSourcesRead, sourceCollectionHandler(options.ValidationBackend)))
 		protectedMux.Handle("/api/v1/sources/", authorize(authorizer, auth.PermissionSourcesRead, sourceDetailHandler(options.ValidationBackend)))
 		protectedMux.Handle("/api/v1/targets", authorize(authorizer, auth.PermissionTargetsRead, targetCollectionHandler(options.ValidationBackend)))
-		protectedMux.Handle("/api/v1/targets/", targetPhaseOneHandler(options.ValidationBackend, authorizer))
+		protectedMux.Handle("/api/v1/targets/", targetPhaseOneHandler(options.ValidationBackend, authorizer, options.CredentialBackend, options.PublicURL, options.TrustedProxies))
 		protectedMux.Handle("/api/v1/validations", validationCollectionHandler(options.ValidationBackend, authorizer))
 		protectedMux.Handle("/api/v1/validations/", authorize(authorizer, auth.PermissionValidationsRead, validationDetailHandler(options.ValidationBackend)))
 	}
@@ -369,7 +413,7 @@ func sessionHandler(w http.ResponseWriter, request *http.Request) {
 		api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
 		return
 	}
-	response := api.SessionResponse{APIVersion: api.Version, Authenticated: true, AuthenticationMethod: actor.Method, Actor: actor}
+	response := api.SessionResponse{APIVersion: api.Version, Authenticated: true, AuthenticationMethod: actor.Method, Actor: actor, CSRFToken: actor.CSRFToken}
 	if !actor.SessionExpiresAt.IsZero() {
 		expires := actor.SessionExpiresAt
 		response.ExpiresAt = &expires
@@ -436,7 +480,7 @@ func detailReadHandler(prefix string, authorizer auth.Authorizer, permission aut
 	})
 }
 
-func targetSubresourceHandler(authorizer auth.Authorizer) http.Handler {
+func targetSubresourceHandler(authorizer auth.Authorizer, backend CredentialBackend, publicURL string, trustedProxies []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/targets/")
 		parts := strings.Split(remainder, "/")
@@ -450,13 +494,13 @@ func targetSubresourceHandler(authorizer auth.Authorizer) http.Handler {
 		}
 		switch parts[1] {
 		case "credential-status":
-			authorize(authorizer, auth.PermissionCredentialsRead, readPlaceholder("credential status")).ServeHTTP(w, request)
+			authorize(authorizer, auth.PermissionCredentialsRead, credentialStatusHandler(backend, parts[0])).ServeHTTP(w, request)
 		case "credentials":
 			switch request.Method {
 			case http.MethodPut:
-				authorize(authorizer, auth.PermissionCredentialsWrite, jsonMutationPlaceholder(http.MethodPut, "endpoint_not_implemented", "credential upload is not implemented yet")).ServeHTTP(w, request)
+				authorize(authorizer, auth.PermissionCredentialsWrite, credentialPutHandler(backend, parts[0], publicURL, trustedProxies)).ServeHTTP(w, request)
 			case http.MethodDelete:
-				authorize(authorizer, auth.PermissionCredentialsWrite, jsonMutationPlaceholder(http.MethodDelete, "endpoint_not_implemented", "credential deletion is not implemented yet")).ServeHTTP(w, request)
+				authorize(authorizer, auth.PermissionCredentialsWrite, credentialDeleteHandler(backend, parts[0], publicURL, trustedProxies)).ServeHTTP(w, request)
 			default:
 				allowMethods(w, request, http.MethodPut, http.MethodDelete)
 			}
@@ -511,6 +555,9 @@ func auditedAction(recorder audit.Recorder, logger *slog.Logger, action audit.Ac
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tracked := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(tracked, r)
+		if tracked.auditAction != "" {
+			action = tracked.auditAction
+		}
 		actor, hasActor := auth.ActorFromContext(r.Context())
 		outcome := audit.OutcomeSucceeded
 		if tracked.status == http.StatusUnauthorized || tracked.status == http.StatusForbidden || (action == audit.ActionLogin && tracked.status == http.StatusConflict) {
@@ -531,7 +578,7 @@ func auditedAction(recorder audit.Recorder, logger *slog.Logger, action audit.Ac
 		if action == audit.ActionPlanApply && len(parts) >= 4 {
 			event.PlanID = parts[3]
 		}
-		if (action == audit.ActionCredentialUpload || action == audit.ActionCredentialDelete) && len(parts) >= 4 {
+		if (action == audit.ActionCredentialUpload || action == audit.ActionCredentialRotate || action == audit.ActionCredentialDelete) && len(parts) >= 4 {
 			event.TargetID = parts[3]
 		}
 		if err := recorder.Record(r.Context(), event); err != nil {
@@ -779,6 +826,7 @@ type statusWriter struct {
 	status      int
 	bytes       int
 	wroteHeader bool
+	auditAction audit.Action
 }
 
 func (writer *statusWriter) WriteHeader(status int) {

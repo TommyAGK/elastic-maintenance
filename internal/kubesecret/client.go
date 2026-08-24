@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TommyAGK/elastic-maintenance/internal/config"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,11 +15,18 @@ import (
 )
 
 const (
-	ManagedByLabel      = "app.kubernetes.io/managed-by"
-	ManagedByValue      = "elastic-maintainer"
-	StateIDAnnotation   = "elastic-maintainer.tommyagk.github.io/state-id"
-	TargetIDAnnotation  = "elastic-maintainer.tommyagk.github.io/target-id"
-	UpdatedAtAnnotation = "elastic-maintainer.tommyagk.github.io/updated-at"
+	ManagedByLabel                = "app.kubernetes.io/managed-by"
+	ManagedByValue                = "elastic-maintainer"
+	StateIDAnnotation             = "elastic-maintainer.tommyagk.github.io/state-id"
+	TargetIDAnnotation            = "elastic-maintainer.tommyagk.github.io/target-id"
+	UpdatedAtAnnotation           = "elastic-maintainer.tommyagk.github.io/updated-at"
+	ActorAnnotation               = "elastic-maintainer.tommyagk.github.io/actor"
+	IdempotencyHashAnnotation     = "elastic-maintainer.tommyagk.github.io/idempotency-hash"
+	RequestDigestDataKey          = "elastic-maintainer-request-digest"
+	CertificateSHA256Annotation   = "elastic-maintainer.tommyagk.github.io/certificate-sha256"
+	CertificateNotAfterAnnotation = "elastic-maintainer.tommyagk.github.io/certificate-not-after"
+	OperationAnnotation           = "elastic-maintainer.tommyagk.github.io/operation"
+	legacyRequestDigestAnnotation = "elastic-maintainer.tommyagk.github.io/request-digest"
 )
 
 var (
@@ -50,9 +58,15 @@ type Client struct {
 	now                        func() time.Time
 }
 type Status struct {
-	Namespace, Name, ResourceVersion string
-	UpdatedAt                        time.Time
-	TargetID                         string
+	Namespace, Name, ResourceVersion                                              string
+	UpdatedAt                                                                     time.Time
+	TargetID, Actor, IdempotencyHash, RequestDigest, CertificateSHA256, Operation string
+	CertificateNotAfter                                                           time.Time
+	MetadataValid                                                                 bool
+}
+type WriteMetadata struct {
+	Actor, IdempotencyHash, RequestDigest, CertificateSHA256, Operation string
+	CertificateNotAfter                                                 time.Time
 }
 type Material struct {
 	Status Status
@@ -88,16 +102,17 @@ func (client *Client) Read(ctx context.Context, name, targetID string) (Material
 	return Material{Status: statusOf(secret), Data: cloneData(secret.Data)}, nil
 }
 
-func (client *Client) Upsert(ctx context.Context, name, targetID string, data map[string][]byte) (Status, error) {
+func (client *Client) Upsert(ctx context.Context, name, targetID string, data map[string][]byte, metadata WriteMetadata) (Status, error) {
 	if err := client.validateName(name); err != nil || !idPattern.MatchString(targetID) {
 		return Status{}, ErrInvalidReference
 	}
-	if data == nil {
+	if data == nil || !validWriteMetadata(metadata) {
 		return Status{}, ErrInvalidReference
 	}
 	existing, err := client.api.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: client.namespace, Name: name, Labels: map[string]string{ManagedByLabel: ManagedByValue}, Annotations: map[string]string{StateIDAnnotation: client.stateID, TargetIDAnnotation: targetID, UpdatedAtAnnotation: client.now().UTC().Format(time.RFC3339Nano)}}, Type: corev1.SecretTypeOpaque, Data: cloneData(data)}
+		applyWriteMetadata(secret, metadata)
 		created, createErr := client.api.Create(ctx, secret, metav1.CreateOptions{})
 		if createErr != nil {
 			return Status{}, classify(createErr)
@@ -118,6 +133,7 @@ func (client *Client) Upsert(ctx context.Context, name, targetID string, data ma
 	updated.Data = cloneData(data)
 	ensureMetadata(updated, client.stateID, targetID)
 	updated.Annotations[UpdatedAtAnnotation] = client.now().UTC().Format(time.RFC3339Nano)
+	applyWriteMetadata(updated, metadata)
 	result, updateErr := client.api.Update(ctx, updated, metav1.UpdateOptions{})
 	if updateErr != nil {
 		return Status{}, classify(updateErr)
@@ -186,9 +202,41 @@ func ensureMetadata(secret *corev1.Secret, stateID, targetID string) {
 	secret.Annotations[StateIDAnnotation] = stateID
 	secret.Annotations[TargetIDAnnotation] = targetID
 }
+func applyWriteMetadata(secret *corev1.Secret, metadata WriteMetadata) {
+	secret.Annotations[ActorAnnotation] = metadata.Actor
+	secret.Annotations[IdempotencyHashAnnotation] = metadata.IdempotencyHash
+	secret.Annotations[OperationAnnotation] = metadata.Operation
+	delete(secret.Annotations, legacyRequestDigestAnnotation)
+	secret.Data[RequestDigestDataKey] = []byte(metadata.RequestDigest)
+	if metadata.CertificateSHA256 == "" {
+		delete(secret.Annotations, CertificateSHA256Annotation)
+		delete(secret.Annotations, CertificateNotAfterAnnotation)
+	} else {
+		secret.Annotations[CertificateSHA256Annotation] = metadata.CertificateSHA256
+		secret.Annotations[CertificateNotAfterAnnotation] = metadata.CertificateNotAfter.UTC().Format(time.RFC3339Nano)
+	}
+}
+func validWriteMetadata(value WriteMetadata) bool {
+	return len(value.Actor) > 0 && len(value.Actor) <= 256 && hex64(value.IdempotencyHash) && hex64(value.RequestDigest) && (value.Operation == "upload" || value.Operation == "rotate") && (value.CertificateSHA256 == "" && value.CertificateNotAfter.IsZero() || hex64(value.CertificateSHA256) && !value.CertificateNotAfter.IsZero())
+}
+func hex64(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+			return false
+		}
+	}
+	return true
+}
 func statusOf(secret *corev1.Secret) Status {
-	updated, _ := time.Parse(time.RFC3339Nano, secret.Annotations[UpdatedAtAnnotation])
-	return Status{Namespace: secret.Namespace, Name: secret.Name, ResourceVersion: secret.ResourceVersion, UpdatedAt: updated, TargetID: secret.Annotations[TargetIDAnnotation]}
+	updated, updatedErr := time.Parse(time.RFC3339Nano, secret.Annotations[UpdatedAtAnnotation])
+	certificateHash, hashPresent := secret.Annotations[CertificateSHA256Annotation]
+	certificateTime, timePresent := secret.Annotations[CertificateNotAfterAnnotation]
+	notAfter, certificateErr := time.Parse(time.RFC3339Nano, certificateTime)
+	certificateValid := !hashPresent && !timePresent || hashPresent && timePresent && certificateHash != "" && certificateTime != "" && certificateErr == nil
+	return Status{Namespace: secret.Namespace, Name: secret.Name, ResourceVersion: secret.ResourceVersion, UpdatedAt: updated, TargetID: secret.Annotations[TargetIDAnnotation], Actor: secret.Annotations[ActorAnnotation], IdempotencyHash: secret.Annotations[IdempotencyHashAnnotation], RequestDigest: string(secret.Data[RequestDigestDataKey]), CertificateSHA256: certificateHash, CertificateNotAfter: notAfter, Operation: secret.Annotations[OperationAnnotation], MetadataValid: updatedErr == nil && certificateValid}
 }
 func cloneData(input map[string][]byte) map[string][]byte {
 	result := make(map[string][]byte, len(input))
@@ -213,6 +261,9 @@ func classify(err error) error {
 	default:
 		return ErrUnavailable
 	}
+}
+func ValidatePolicy(policy config.KubernetesSecretPolicy, stateID string) error {
+	return validateIdentity(policy.Namespace, policy.NamePrefix, stateID)
 }
 func validateIdentity(namespace, prefix, stateID string) error {
 	if !validNamespace(namespace) || !validPrefix(prefix) || !stateIDPattern.MatchString(stateID) {

@@ -66,6 +66,10 @@ func (api *fakeAPI) Delete(_ context.Context, name string, options metav1.Delete
 	return api.deleteErr
 }
 
+func testWriteMetadata() WriteMetadata {
+	return WriteMetadata{Actor: "administrator", IdempotencyHash: strings.Repeat("a", 64), RequestDigest: strings.Repeat("b", 64), Operation: "upload"}
+}
+
 func TestCreateUpdateReadAndDeleteOwnedSecret(t *testing.T) {
 	clock := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	backend := &fakeAPI{}
@@ -75,12 +79,20 @@ func TestCreateUpdateReadAndDeleteOwnedSecret(t *testing.T) {
 	}
 	name := "elastic-maintainer-target-prod"
 	data := map[string][]byte{"api-key": []byte("credential-sentinel")}
-	status, err := client.Upsert(context.Background(), name, "prod", data)
+	status, err := client.Upsert(context.Background(), name, "prod", data, testWriteMetadata())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if status.ResourceVersion != "1" || backend.created.Namespace != "elastic-maintainer" || backend.created.Type != corev1.SecretTypeOpaque || backend.created.Labels[ManagedByLabel] != ManagedByValue || backend.created.Annotations[StateIDAnnotation] != "state-1" || backend.created.Annotations[TargetIDAnnotation] != "prod" {
 		t.Fatalf("created metadata=%s/%s status=%#v", backend.created.Namespace, backend.created.Name, status)
+	}
+	if string(backend.created.Data[RequestDigestDataKey]) != strings.Repeat("b", 64) {
+		t.Fatal("request digest missing from Secret data")
+	}
+	for key := range backend.created.Annotations {
+		if strings.Contains(key, "request-digest") {
+			t.Fatal("request digest persisted as annotation")
+		}
 	}
 	data["api-key"][0] = 'X'
 	if string(backend.created.Data["api-key"]) != "credential-sentinel" {
@@ -88,11 +100,15 @@ func TestCreateUpdateReadAndDeleteOwnedSecret(t *testing.T) {
 	}
 	backend.secret = backend.created.DeepCopy()
 	backend.secret.ResourceVersion = "1"
+	backend.secret.Annotations[legacyRequestDigestAnnotation] = "forbidden"
 	clock = clock.Add(time.Hour)
 	updatedData := map[string][]byte{"api-key": []byte("rotated-sentinel")}
-	status, err = client.Upsert(context.Background(), name, "prod", updatedData)
+	status, err = client.Upsert(context.Background(), name, "prod", updatedData, testWriteMetadata())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, exists := backend.updated.Annotations[legacyRequestDigestAnnotation]; exists {
+		t.Fatal("legacy request digest annotation survived update")
 	}
 	if status.ResourceVersion != "2" || backend.updated.ResourceVersion != "1" || backend.updated.Annotations[UpdatedAtAnnotation] != clock.Format(time.RFC3339Nano) {
 		t.Fatalf("updated metadata=%s/%s rv=%s status=%#v", backend.updated.Namespace, backend.updated.Name, backend.updated.ResourceVersion, status)
@@ -130,7 +146,7 @@ func TestRefusesInvalidUnownedAndCrossTargetSecretsBeforeMutation(t *testing.T) 
 	if backend.gets != 0 {
 		t.Fatalf("invalid names made %d API calls", backend.gets)
 	}
-	if _, err := client.Upsert(context.Background(), owned.Name, "prod", map[string][]byte{"api-key": []byte("never-log-this")}); !errors.Is(err, ErrUnowned) {
+	if _, err := client.Upsert(context.Background(), owned.Name, "prod", map[string][]byte{"api-key": []byte("never-log-this")}, testWriteMetadata()); !errors.Is(err, ErrUnowned) {
 		t.Fatalf("unowned update error=%v", err)
 	}
 	if backend.updated != nil {
@@ -164,20 +180,27 @@ func TestClientAcceptsFullServerStateIDContract(t *testing.T) {
 	}
 }
 
+func TestEmptyPresentCertificateMetadataIsInvalid(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{UpdatedAtAnnotation: time.Now().UTC().Format(time.RFC3339Nano), CertificateSHA256Annotation: "", CertificateNotAfterAnnotation: ""}}}
+	if statusOf(secret).MetadataValid {
+		t.Fatal("empty present certificate metadata accepted")
+	}
+}
+
 func TestRejectsMalformedAPIResponses(t *testing.T) {
 	backend := &fakeAPI{createResult: &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "target-prod"}}}
 	client, err := New(Options{Namespace: "ns", NamePrefix: "target-", StateID: "state", API: backend})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Upsert(context.Background(), "target-prod", "prod", map[string][]byte{}); !errors.Is(err, ErrUnavailable) {
+	if _, err := client.Upsert(context.Background(), "target-prod", "prod", map[string][]byte{}, testWriteMetadata()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("create response error=%v", err)
 	}
 	owned := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "target-prod", Labels: map[string]string{ManagedByLabel: ManagedByValue}, Annotations: map[string]string{StateIDAnnotation: "state", TargetIDAnnotation: "prod"}}}
 	backend.secret = owned
 	backend.createResult = nil
 	backend.updateResult = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "wrong"}}
-	if _, err := client.Upsert(context.Background(), "target-prod", "prod", map[string][]byte{}); !errors.Is(err, ErrUnavailable) {
+	if _, err := client.Upsert(context.Background(), "target-prod", "prod", map[string][]byte{}, testWriteMetadata()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("update response error=%v", err)
 	}
 }
