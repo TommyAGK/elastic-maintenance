@@ -41,8 +41,13 @@ func TestTargetClientUsesUploadedCATrustAndAPIKeyForLeaseLifetime(t *testing.T) 
 	var authorization string
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authorization = r.Header.Get("Authorization")
+		if r.URL.Path == "/api/status" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"version":{"number":"9.4.2"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"items":[]}`))
+		w.Write([]byte(`{"items":[],"total":0}`))
 	}))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{serverCertificate}}
 	server.StartTLS()
@@ -129,6 +134,9 @@ func TestTargetClientDoesNotUseEnvironmentProxy(t *testing.T) {
 	}
 	defer client.Close()
 	transport := client.httpClient.Transport.(*http.Transport)
+	if transport.MaxResponseHeaderBytes != 64<<10 {
+		t.Fatal("target response headers are not bounded")
+	}
 	if transport.Proxy != nil {
 		t.Fatal("target transport permits environment proxying")
 	}

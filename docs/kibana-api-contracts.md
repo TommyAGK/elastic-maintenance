@@ -17,6 +17,8 @@ The checked-in JSON fixtures are sanitized, minimal projections of these schemas
 
 All paths support the standard non-default space prefix `/s/{space_id}` according to the public operation definitions.
 
+The HTTP core also probes the unscoped public `GET /api/status` endpoint and reads only `version.number`; it rejects malformed versions and versions outside `>=9.2.0,<10.0.0`. This core status route is tested synthetically because it is not part of the adapter operation fixture set below.
+
 | Adapter operation | Method and default-space path | 9.2.0 | 9.4.2 | Notes |
 | --- | --- | --- | --- | --- |
 | List installed integration packages | `GET /api/fleet/epm/packages/installed` | Yes | Yes | Cursor pagination with `searchAfter` and `perPage` |
@@ -56,7 +58,7 @@ Three pagination contracts must be implemented and tested independently:
 2. Fleet agent/package policies: `page` plus `perPage`.
 3. Detection rule find: `page` plus `per_page`, with `perPage` in the response.
 
-Completion must be determined from documented totals/cursors, not from a short page alone.
+Completion must be determined from present, stable documented totals and progressive cursors, not from a short page alone. Missing/changing totals, repeated or oversized cursors, inconsistent page metadata, and excessive page/item counts fail closed.
 
 ### Mutations and replacement semantics
 

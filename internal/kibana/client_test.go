@@ -24,6 +24,16 @@ func TestTargetResponseBodyIsBounded(t *testing.T) {
 	}
 }
 
+func TestPackageInstallRequiresExactSemanticVersion(t *testing.T) {
+	client := NewClient("http://127.0.0.1:1", "key")
+	defer client.Close()
+	for _, version := range []string{"", "latest", "1.2", "01.2.3", "1.2.3-SNAPSHOT"} {
+		if err := client.installPackage(context.Background(), "endpoint", version); err == nil {
+			t.Errorf("version %q accepted", version)
+		}
+	}
+}
+
 func TestGetJSONSurfacesHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

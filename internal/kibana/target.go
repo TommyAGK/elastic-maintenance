@@ -90,15 +90,16 @@ func (factory *TargetClientFactory) Acquire(ctx context.Context, targetID string
 		return nil, ErrTargetUnready
 	}
 	transport := &http.Transport{
-		Proxy:                 nil,
-		DialContext:           factory.dialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          20,
-		MaxIdleConnsPerHost:   4,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		ExpectContinueTimeout: time.Second,
+		Proxy:                  nil,
+		DialContext:            factory.dialContext,
+		ForceAttemptHTTP2:      true,
+		MaxIdleConns:           20,
+		MaxIdleConnsPerHost:    4,
+		IdleConnTimeout:        90 * time.Second,
+		TLSHandshakeTimeout:    10 * time.Second,
+		ResponseHeaderTimeout:  30 * time.Second,
+		MaxResponseHeaderBytes: 64 << 10,
+		ExpectContinueTimeout:  time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    roots,
@@ -111,6 +112,7 @@ func (factory *TargetClientFactory) Acquire(ctx context.Context, targetID string
 		return nil, ErrTargetUnready
 	}
 	client := newClient(identity.URL, apiKey, httpClient, func() { transport.TLSClientConfig.RootCAs = nil; lease.Close() })
+	client.space = identity.Space
 	clear(apiKey)
 	success = true
 	return client, nil
