@@ -4,12 +4,13 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository has passed the **Phase 2: OIDC, Kubernetes Secrets, Kibana reads, and inventory API** gate and is not yet production-ready. Production OIDC and bearer authentication, audited break-glass access, centralized RBAC/audit hooks, least-privilege owned Kubernetes Secrets, no-readback credential workflows, leased TLS/API-key clients, bounded space-aware Kibana HTTP, complete pagination, typed canonical read adapters, target readiness/version probes, and asynchronous paginated live inventory are implemented in the API and embedded UI. Live inventory jobs and credential replay history are intentionally bounded and process-local in v1; Phase 3 adds PVC-backed state, durable audit, diffing, and saved plans. The active direction is defined by:
+The repository has passed the **Phase 2: OIDC, Kubernetes Secrets, Kibana reads, and inventory API** gate and has completed **Phase 3.1: versioned non-secret state formats**. Phase 3 as a whole is not passed and the repository is not yet production-ready. Production OIDC and bearer authentication, audited break-glass access, centralized RBAC/audit hooks, least-privilege owned Kubernetes Secrets, no-readback credential workflows, leased TLS/API-key clients, bounded space-aware Kibana HTTP, complete pagination, typed canonical read adapters, target readiness/version probes, and asynchronous paginated live inventory are implemented in the API and embedded UI. Live inventory jobs and credential replay history are intentionally bounded and process-local in v1; the remaining Phase 3 work adds PVC-backed persistence, durable audit, diffing, and saved plans. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`
 - Completed Phase 1 sub-plan: `docs/implementation/subplans/phase-1-mounted-inputs-resource-sets-and-validation-api.md`
-- Next phase sub-plan: `docs/implementation/subplans/phase-2-oidc-kubernetes-secrets-kibana-reads-and-inventory-api.md`
+- Phase 3 state-format contract: `docs/state-formats.md`
+- Phase 3 sub-plan: `docs/implementation/subplans/phase-3-pvc-state-diff-plans-and-planning-api.md`
 - Kibana contract baseline: `docs/kibana-api-contracts.md`
 
 ## Target architecture

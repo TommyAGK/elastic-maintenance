@@ -1,5 +1,7 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
+**Status: Phase 3.1 complete; Phase 3 not passed.** The versioned non-secret state schemas and strict codecs are implemented in `internal/state`; filesystem persistence, recovery, planning, and API work remain.
+
 ## Objective
 
 Implement single-writer non-secret PVC state, durable jobs/audit/inventory, ownership-safe diffing, deterministic plans, and web/API plan review.
@@ -11,13 +13,16 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 ## Substeps
 
-### 3.1 Define versioned state formats
+### 3.1 Define versioned state formats — **Complete**
 
 1. Define source snapshot, inventory, journal, plan, job, report, idempotency, and audit schemas.
-2. Reject unknown/unsupported versions.
-3. Keep all formats non-secret.
-4. Define migration policy: explicit offline/new-version migration only, no silent destructive upgrades.
-5. Store actor IDs/roles and Secret metadata references, never tokens/values.
+2. Use one lockstep `elastic-maintainer/state/v1alpha1` API version and reject unknown/unsupported versions, kinds, fields, duplicate keys/identities, trailing JSON, invalid bounded values, and nil decode destinations.
+3. Use domain-bearing v1 SHA-256 fingerprints for desired, Kibana-live, ownership-inventory, and target-config state; reject domain confusion.
+4. Distinguish remote absence from missing state with explicit `RemoteStateAssertion` presence values.
+5. Keep plan mutations to create/update/delete; represent unchanged/conflict/skip/reject as observations, with deterministic target/phase/kind/logical/action/ID ordering and earlier same-target dependencies.
+6. Store actor IDs/roles/auth method and credential Secret metadata only, never tokens, values, request digests in credential metadata, or certificate bodies.
+7. Require explicit migration of the complete state set for any version or kind change; never migrate silently.
+8. Keep this increment directory-neutral: no filesystem persistence, locking, recovery engine, or API.
 
 ### 3.2 Harden the state directory
 
@@ -43,7 +48,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 2. Segment/rotate append-oriented files atomically.
 3. Provide paginated authorized reads.
 4. Redact before persistence.
-5. Audit credential metadata operations without values.
+5. Audit credential metadata operations without values; persisted actions use a bounded namespaced action pattern.
 6. Test restart and partial-write behavior.
 
 ### 3.5 Implement inventory and journal recovery
@@ -75,11 +80,12 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 ### 3.8 Build deterministic dependency plans
 
 1. Add automatic/explicit DAG edges.
-2. Order ready nodes by phase/kind/id/action.
-3. Store dependency IDs explicitly.
-4. Scope mounted source/config digests per selected target/resource set.
+2. Order operations by exact target/phase/kind/logical ID/action/ID.
+3. Store sorted unique dependencies that point to earlier operations on the same exact target.
+4. Scope mounted source/resource-set/target desired and target-config fingerprints per selected target.
 5. Include external revision metadata only as provenance.
-6. Keep plans server-managed; expose read projections, not filesystem paths/edit APIs.
+6. Require delete marker compatibility and exact declared inventory generation; never delete integrations or prebuilt rules.
+7. Keep plans server-managed; expose read projections, not filesystem paths/edit APIs.
 
 ### 3.9 Implement planning jobs/API
 
