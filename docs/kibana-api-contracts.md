@@ -79,6 +79,12 @@ The pinned specs explicitly identify these Fleet route privileges:
 
 The public operation text does not enumerate explicit privilege names for every package-policy and detection-rule operation. Do not infer or hard-code missing privilege claims. Capture the minimum successful role during the live matrix and document it before the Phase 0 contract gate is declared complete.
 
+## Live projection contract
+
+Typed reads preserve the bounded raw item as a private, defensively copied complete-update baseline while fingerprinting only managed fields. Integration fingerprints include name/version; agent-policy fingerprints include caller identity, name, and namespace; package-policy fingerprints include identity, name, namespace, exact package, and sorted agent-policy IDs; custom query-rule fingerprints include `rule_id`, name, type, enabled state, query, severity, interval, language, and sorted indexes; collective prebuilt fingerprints include all seven documented counts. Generated IDs where they are not the caller identity, revisions, versions, timestamps, actors, ownership markers, and other server-managed fields are excluded. Fingerprints use the versioned `elastic-maintainer/kibana-live` domain and RFC-canonical JSON.
+
+Immutable/prebuilt and unsupported non-query rules remain visible as non-manageable collision evidence rather than being mistaken for absent custom rules.
+
 ## Version differences relevant to v1
 
 - The 9.4.2 EPM exact-version operations mark `pkgVersion` as required more consistently than the 9.2.0 generated schema. The application requires it in both versions.

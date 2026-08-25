@@ -40,27 +40,6 @@ func (e *ResponseError) Error() string {
 	return fmt.Sprintf("kibana api %d: %s", e.StatusCode, e.Message)
 }
 
-type InstalledPackage struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-type PackagePolicy struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-}
-
-type Rule struct {
-	ID      string   `json:"id"`
-	RuleID  string   `json:"rule_id"`
-	Name    string   `json:"name"`
-	Type    string   `json:"type"`
-	Enabled bool     `json:"enabled"`
-	Query   string   `json:"query"`
-	Index   []string `json:"index"`
-}
-
 type ReviewChange struct {
 	Kind    string
 	Name    string
@@ -69,10 +48,12 @@ type ReviewChange struct {
 }
 
 type CreatePackagePolicyRequest struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	PolicyID  string `json:"policy_id,omitempty"`
-	Package   struct {
+	ID          string `json:"id,omitempty"`
+	Description string `json:"description,omitempty"`
+	Name        string `json:"name"`
+	Namespace   string `json:"namespace"`
+	PolicyID    string `json:"policy_id,omitempty"`
+	Package     struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"package"`
@@ -93,6 +74,7 @@ type CreateRuleRequest struct {
 	Interval string   `json:"interval,omitempty"`
 	Language string   `json:"language,omitempty"`
 	Index    []string `json:"index,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
 }
 
 func NewClient(baseURL, apiKey string) *Client {

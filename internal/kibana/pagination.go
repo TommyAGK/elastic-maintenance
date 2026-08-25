@@ -14,12 +14,6 @@ const (
 	maxListPages = 10000
 )
 
-type AgentPolicy struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-}
-
 type cursorPage[T any] struct {
 	Items       *[]T     `json:"items"`
 	SearchAfter []string `json:"searchAfter"`
@@ -33,7 +27,7 @@ type numberedPage[T any] struct {
 	Total   *int `json:"total"`
 }
 
-func (c *Client) InstalledPackages(ctx context.Context) ([]InstalledPackage, error) {
+func (c *Client) installedPackages(ctx context.Context) ([]InstalledPackage, error) {
 	items := []InstalledPackage{}
 	var cursor []string
 	seen := map[string]bool{}
@@ -84,13 +78,13 @@ func (c *Client) InstalledPackages(ctx context.Context) ([]InstalledPackage, err
 	return nil, paginationError()
 }
 
-func (c *Client) AgentPolicies(ctx context.Context) ([]AgentPolicy, error) {
+func (c *Client) agentPolicies(ctx context.Context) ([]AgentPolicy, error) {
 	return numberedItems[AgentPolicy](ctx, c, "/api/fleet/agent_policies", false)
 }
-func (c *Client) PackagePolicies(ctx context.Context) ([]PackagePolicy, error) {
+func (c *Client) packagePolicies(ctx context.Context) ([]PackagePolicy, error) {
 	return numberedItems[PackagePolicy](ctx, c, "/api/fleet/package_policies", false)
 }
-func (c *Client) Rules(ctx context.Context) ([]Rule, error) {
+func (c *Client) rules(ctx context.Context) ([]Rule, error) {
 	return numberedItems[Rule](ctx, c, "/api/detection_engine/rules/_find", true)
 }
 

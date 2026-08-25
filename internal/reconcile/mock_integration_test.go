@@ -14,9 +14,9 @@ func TestReviewAgainstMockKibana(t *testing.T) {
 
 	cli := kibana.NewClient(srv.URL(), "test-key")
 	rep, err := Run(cli, &config.DesiredState{
-		Integrations: []config.Integration{{Name: "endpoint", Version: "8.18.0"}},
+		Integrations:  []config.Integration{{Name: "endpoint", Version: "8.18.0"}},
 		FleetPolicies: []config.FleetPolicy{{Name: "policy-a"}},
-		Rules: []config.Rule{{Name: "rule-a", Type: "query", Enabled: true}},
+		Rules:         []config.Rule{{Name: "rule-a", Type: "query", Enabled: true}},
 	}, ModeReview)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -38,9 +38,9 @@ func TestApplyAgainstMockKibana(t *testing.T) {
 
 	cli := kibana.NewClient(srv.URL(), "test-key")
 	_, err := Run(cli, &config.DesiredState{
-		Integrations: []config.Integration{{Name: "endpoint", Version: "8.18.0"}},
+		Integrations:  []config.Integration{{Name: "endpoint", Version: "8.18.0"}},
 		FleetPolicies: []config.FleetPolicy{{Name: "policy-a"}},
-		Rules: []config.Rule{{Name: "rule-a", RuleID: "rule-a", Type: "query", Enabled: true, Query: "bar", Index: "logs-*"}},
+		Rules:         []config.Rule{{Name: "rule-a", RuleID: "rule-a", Type: "query", Enabled: true, Query: "bar", Severity: "low", Interval: "5m", Language: "kuery", Index: "logs-*"}},
 	}, ModeApply)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
