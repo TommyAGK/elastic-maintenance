@@ -381,7 +381,7 @@ func TestEveryProtectedEndpointUsesTheCentralRoleMatrix(t *testing.T) {
 	routes := []struct {
 		method, path string
 		permission   auth.Permission
-	}{{"GET", "/api/v1/session", auth.PermissionSessionRead}, {"GET", "/api/v1/sources", auth.PermissionSourcesRead}, {"GET", "/api/v1/sources/source-1", auth.PermissionSourcesRead}, {"GET", "/api/v1/targets", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1/credential-status", auth.PermissionCredentialsRead}, {"PUT", "/api/v1/targets/target-1/credentials", auth.PermissionCredentialsWrite}, {"DELETE", "/api/v1/targets/target-1/credentials", auth.PermissionCredentialsWrite}, {"GET", "/api/v1/validations", auth.PermissionValidationsRead}, {"POST", "/api/v1/validations", auth.PermissionValidationsCreate}, {"GET", "/api/v1/validations/job-1", auth.PermissionValidationsRead}, {"GET", "/api/v1/plans", auth.PermissionPlansRead}, {"POST", "/api/v1/plans", auth.PermissionPlansCreate}, {"GET", "/api/v1/plans/plan-1", auth.PermissionPlansRead}, {"POST", "/api/v1/plans/plan-1/apply", auth.PermissionPlansApply}, {"GET", "/api/v1/jobs", auth.PermissionJobsRead}, {"GET", "/api/v1/jobs/job-1", auth.PermissionJobsRead}, {"GET", "/api/v1/reports", auth.PermissionReportsRead}, {"GET", "/api/v1/reports/report-1", auth.PermissionReportsRead}, {"GET", "/api/v1/audit", auth.PermissionAuditRead}}
+	}{{"GET", "/api/v1/session", auth.PermissionSessionRead}, {"GET", "/api/v1/sources", auth.PermissionSourcesRead}, {"GET", "/api/v1/sources/source-1", auth.PermissionSourcesRead}, {"GET", "/api/v1/targets", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1/readiness", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1/version", auth.PermissionTargetsRead}, {"POST", "/api/v1/targets/target-1/inventory", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1/inventory/job-1", auth.PermissionTargetsRead}, {"GET", "/api/v1/targets/target-1/credential-status", auth.PermissionCredentialsRead}, {"PUT", "/api/v1/targets/target-1/credentials", auth.PermissionCredentialsWrite}, {"DELETE", "/api/v1/targets/target-1/credentials", auth.PermissionCredentialsWrite}, {"GET", "/api/v1/validations", auth.PermissionValidationsRead}, {"POST", "/api/v1/validations", auth.PermissionValidationsCreate}, {"GET", "/api/v1/validations/job-1", auth.PermissionValidationsRead}, {"GET", "/api/v1/plans", auth.PermissionPlansRead}, {"POST", "/api/v1/plans", auth.PermissionPlansCreate}, {"GET", "/api/v1/plans/plan-1", auth.PermissionPlansRead}, {"POST", "/api/v1/plans/plan-1/apply", auth.PermissionPlansApply}, {"GET", "/api/v1/jobs", auth.PermissionJobsRead}, {"GET", "/api/v1/jobs/job-1", auth.PermissionJobsRead}, {"GET", "/api/v1/reports", auth.PermissionReportsRead}, {"GET", "/api/v1/reports/report-1", auth.PermissionReportsRead}, {"GET", "/api/v1/audit", auth.PermissionAuditRead}}
 	for _, role := range auth.KnownRoles() {
 		actor := auth.Actor{Subject: "operator", Roles: []auth.Role{role}, Method: auth.MethodSession}
 		handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: actor}})
@@ -404,8 +404,9 @@ func TestEveryProtectedEndpointUsesTheCentralRoleMatrix(t *testing.T) {
 
 func TestLogoutAuditIsRecordedExactlyOnce(t *testing.T) {
 	recorder := &recordingAudit{}
-	handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator", Roles: []auth.Role{auth.RoleViewer}}}, LogoutAuth: successfulBrowserAuth{}, AuditRecorder: recorder})
+	handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator", Roles: []auth.Role{auth.RoleViewer}, CSRFToken: "csrf-token"}}, LogoutAuth: successfulBrowserAuth{}, AuditRecorder: recorder})
 	request := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	request.Header.Set(api.CSRFTokenHeader, "csrf-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || len(recorder.events) != 1 || recorder.events[0].Action != audit.ActionLogout || recorder.events[0].Outcome != audit.OutcomeSucceeded {
@@ -437,7 +438,7 @@ func TestCredentialAuditDistinguishesUploadAndRotation(t *testing.T) {
 func TestMutationAuditHooksRecordActorActionAndOutcome(t *testing.T) {
 	recorder := &recordingAudit{}
 	backend := newPhaseOneBackend()
-	planner := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "planner", Roles: []auth.Role{auth.RolePlanner}}}, ValidationBackend: backend, AuditRecorder: recorder})
+	planner := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "planner", Roles: []auth.Role{auth.RolePlanner}, CSRFToken: "csrf-token"}}, ValidationBackend: backend, AuditRecorder: recorder, PublicURL: "http://localhost"})
 	response := serveRequest(planner, http.MethodPost, "/api/v1/validations", `{}`, "audit-validation")
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -486,10 +487,16 @@ func TestMutationJobPlaceholdersEnforceRoleAndRequestContract(t *testing.T) {
 		"unknown plan path":    {roles: []auth.Role{auth.RoleApplier}, method: http.MethodPost, path: "/api/v1/plans/plan-1/resume", contentType: "application/json", key: "apply-request-1", wantStatus: http.StatusNotFound, wantCode: "not_found"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			handler := NewHandler(HandlerOptions{
-				Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator-1", Roles: testCase.roles}},
-			})
-			request := httptest.NewRequest(testCase.method, testCase.path, strings.NewReader(`{}`))
+			handler := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator-1", Roles: testCase.roles, CSRFToken: "csrf-token"}}, PublicURL: "http://localhost"})
+			requestPath := testCase.path
+			if testCase.path == "/api/v1/validations" {
+				requestPath = "http://localhost" + testCase.path
+			}
+			request := httptest.NewRequest(testCase.method, requestPath, strings.NewReader(`{}`))
+			if testCase.path == "/api/v1/validations" {
+				request.Header.Set("Origin", "http://localhost")
+				request.Header.Set(api.CSRFTokenHeader, "csrf-token")
+			}
 			if testCase.contentType != "" {
 				request.Header.Set("Content-Type", testCase.contentType)
 			}

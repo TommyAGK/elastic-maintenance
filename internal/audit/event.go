@@ -13,15 +13,16 @@ import (
 type Action string
 
 const (
-	ActionLogin            Action = "auth.login"
-	ActionBreakGlassLogin  Action = "auth.break_glass.login"
-	ActionLogout           Action = "auth.logout"
-	ActionCredentialUpload Action = "credentials.upload"
-	ActionCredentialRotate Action = "credentials.rotate"
-	ActionCredentialDelete Action = "credentials.delete"
-	ActionValidationCreate Action = "validations.create"
-	ActionPlanCreate       Action = "plans.create"
-	ActionPlanApply        Action = "plans.apply"
+	ActionLogin                 Action = "auth.login"
+	ActionBreakGlassLogin       Action = "auth.break_glass.login"
+	ActionLogout                Action = "auth.logout"
+	ActionCredentialUpload      Action = "credentials.upload"
+	ActionCredentialRotate      Action = "credentials.rotate"
+	ActionCredentialDelete      Action = "credentials.delete"
+	ActionValidationCreate      Action = "validations.create"
+	ActionTargetInventoryCreate Action = "targets.inventory.create"
+	ActionPlanCreate            Action = "plans.create"
+	ActionPlanApply             Action = "plans.apply"
 )
 
 type Outcome string
@@ -37,7 +38,7 @@ var (
 	knownActions     = map[Action]struct{}{
 		ActionLogin: {}, ActionBreakGlassLogin: {}, ActionLogout: {},
 		ActionCredentialUpload: {}, ActionCredentialRotate: {}, ActionCredentialDelete: {},
-		ActionValidationCreate: {}, ActionPlanCreate: {}, ActionPlanApply: {},
+		ActionValidationCreate: {}, ActionTargetInventoryCreate: {}, ActionPlanCreate: {}, ActionPlanApply: {},
 	}
 )
 

@@ -52,8 +52,8 @@ func TestOpenAPIOperationsAreRegisteredWithMatchingMethods(t *testing.T) {
 		}
 	}
 	sort.Strings(checked)
-	if len(checked) != 27 {
-		t.Fatalf("checked %d operations, want 27:\n%s", len(checked), strings.Join(checked, "\n"))
+	if len(checked) != 31 {
+		t.Fatalf("checked %d operations, want 31:\n%s", len(checked), strings.Join(checked, "\n"))
 	}
 }
 

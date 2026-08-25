@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/TommyAGK/elastic-maintenance/internal/config"
 )
 
 type Client struct {
@@ -24,6 +26,7 @@ type Client struct {
 	versionMu  sync.Mutex
 	version    string
 	retryWait  func(context.Context, time.Duration) error
+	identity   config.TargetIdentity
 }
 
 const maxTargetResponseBytes int64 = 8 << 20
@@ -87,6 +90,12 @@ func NewClient(baseURL, apiKey string) *Client {
 }
 func newClient(baseURL string, apiKey []byte, httpClient *http.Client, closeHook func()) *Client {
 	return &Client{baseURL: baseURL, apiKey: append([]byte{}, apiKey...), httpClient: httpClient, closeHook: closeHook, space: "default", retryWait: waitForRetry}
+}
+func (c *Client) TargetIdentity() config.TargetIdentity {
+	if c == nil {
+		return config.TargetIdentity{}
+	}
+	return c.identity
 }
 func (c *Client) Close() {
 	if c == nil {

@@ -158,9 +158,9 @@ func targetCollectionHandler(backend ValidationBackend) http.Handler {
 	})
 }
 
-func targetPhaseOneHandler(backend ValidationBackend, authorizer auth.Authorizer, credentials CredentialBackend, publicURL string, trustedProxies []string) http.Handler {
+func targetPhaseOneHandler(backend ValidationBackend, authorizer auth.Authorizer, credentials CredentialBackend, live LiveInventoryBackend, publicURL string, trustedProxies []string) http.Handler {
 	detail := authorize(authorizer, auth.PermissionTargetsRead, targetDetailHandler(backend))
-	fallback := targetSubresourceHandler(authorizer, credentials, publicURL, trustedProxies)
+	fallback := targetSubresourceHandler(authorizer, credentials, live, backend, publicURL, trustedProxies)
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/targets/")
 		if remainder != "" && !strings.Contains(remainder, "/") {
@@ -212,7 +212,7 @@ func targetDetailHandler(backend ValidationBackend) http.Handler {
 	})
 }
 
-func validationCollectionHandler(backend ValidationBackend, authorizer auth.Authorizer) http.Handler {
+func validationCollectionHandler(backend ValidationBackend, authorizer auth.Authorizer, originBackend CredentialBackend, publicURL string, trusted []string) http.Handler {
 	read := authorize(authorizer, auth.PermissionValidationsRead, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		pageSize, last, err := api.ParsePagination(request.URL.Query(), "validations")
 		if err != nil {
@@ -254,6 +254,11 @@ func validationCollectionHandler(backend ValidationBackend, authorizer auth.Auth
 		actor, ok := auth.ActorFromContext(request.Context())
 		if !ok {
 			api.WriteError(w, request, http.StatusUnauthorized, "authentication_required", "authentication is required", RequestID(request.Context()))
+			return
+		}
+		livePublic, liveTrusted, originReady := liveCredentialOrigin(request.Context(), originBackend, publicURL, trusted)
+		if !originReady || !validCredentialMutationOrigin(request, livePublic, liveTrusted) {
+			api.WriteError(w, request, http.StatusBadRequest, "invalid_origin", "validation mutation origin is invalid", RequestID(request.Context()))
 			return
 		}
 		job, err := backend.Start(request.Context(), validation.StartRequest{ActorSubject: actor.Subject, RequestID: RequestID(request.Context()), IdempotencyKey: key, Selection: validation.Selection{ResourceSetIDs: body.ResourceSetIDs, TargetIDs: body.TargetIDs}})

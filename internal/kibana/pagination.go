@@ -10,7 +10,7 @@ import (
 
 const (
 	listPageSize = 100
-	maxListItems = 100000
+	maxListItems = 10000
 	maxListPages = 10000
 )
 

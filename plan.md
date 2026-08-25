@@ -500,6 +500,8 @@ Gate: invalid mounted inputs fail with actionable diagnostics; valid assigned re
 
 ### Phase 2 — OIDC, Kubernetes Secrets, Kibana reads, and inventory API
 
+**Status: passed.**
+
 Detailed sub-plan: `docs/implementation/subplans/phase-2-oidc-kubernetes-secrets-kibana-reads-and-inventory-api.md`
 
 - Complete OIDC/RBAC, independently operable audited break-glass administrator access, credential upload/rotation to owned Secrets, Kibana TLS/version/pagination/read adapters, and target/resource inventory APIs.

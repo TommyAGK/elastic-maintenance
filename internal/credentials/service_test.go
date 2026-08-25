@@ -220,6 +220,31 @@ func TestAcquireMaterialRejectsTamperingWithoutReturningValues(t *testing.T) {
 	}
 }
 
+func TestCredentialIdempotencyHistoryPreventsStaleReplayMutation(t *testing.T) {
+	store := &fakeStore{statusErr: kubesecret.ErrNotFound}
+	service := newCredentialService(t, store, time.Now())
+	if _, err := service.Put(context.Background(), "prod", "rotation-key-one", administrator(), PutRequest{APIKey: "first-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Put(context.Background(), "prod", "rotation-key-two", administrator(), PutRequest{APIKey: "second-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Put(context.Background(), "prod", "rotation-key-one", administrator(), PutRequest{APIKey: "first-key"}); err != nil || store.upserts != 2 {
+		t.Fatalf("replay error=%v upserts=%d", err, store.upserts)
+	}
+	if _, err := service.Put(context.Background(), "prod", "rotation-key-one", administrator(), PutRequest{APIKey: "different-key"}); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("conflict=%v", err)
+	}
+	if _, err := service.Delete(context.Background(), "prod", "delete-key-one", administrator()); err != nil {
+		t.Fatal(err)
+	}
+	store.statusErr = kubesecret.ErrNotFound
+	if _, err := service.Put(context.Background(), "prod", "rotation-key-three", administrator(), PutRequest{APIKey: "replacement-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _,err:=service.Delete(context.Background(),"prod","delete-key-one",administrator());!errors.Is(err,ErrIdempotencyConflict)||store.deletes!=1{t.Fatalf("delete replay error=%v deletes=%d",err,store.deletes)}
+}
+
 func TestUsageTrackerMakesDeleteCheckAtomic(t *testing.T) {
 	tracker := NewUsageTracker()
 	release, err := tracker.Acquire("prod")

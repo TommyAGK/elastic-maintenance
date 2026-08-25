@@ -26,9 +26,10 @@ var (
 type Type string
 
 const (
-	TypeValidation Type = "validation"
-	TypePlan       Type = "plan"
-	TypeApply      Type = "apply"
+	TypeValidation      Type = "validation"
+	TypePlan            Type = "plan"
+	TypeApply           Type = "apply"
+	TypeTargetInventory Type = "target-inventory"
 )
 
 type Status string
@@ -116,7 +117,7 @@ func (job Job) Validate() error {
 }
 
 func (jobType Type) Valid() bool {
-	return jobType == TypeValidation || jobType == TypePlan || jobType == TypeApply
+	return jobType == TypeValidation || jobType == TypePlan || jobType == TypeApply || jobType == TypeTargetInventory
 }
 
 func (status Status) Valid() bool {

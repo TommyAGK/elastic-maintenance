@@ -125,6 +125,29 @@ func TestPhaseOneValidationEndpointsEnforceContractAndRBAC(t *testing.T) {
 	}
 }
 
+func TestValidationCreationRequiresBrowserCSRFButAllowsBearer(t *testing.T) {
+	backend := newPhaseOneBackend()
+	browser := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "planner", Roles: []auth.Role{auth.RolePlanner}, Method: auth.MethodOIDC, CSRFToken: "csrf"}}, ValidationBackend: backend, PublicURL: "https://app.example.test"})
+	request := httptest.NewRequest(http.MethodPost, "https://app.example.test/api/v1/validations", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(api.IdempotencyKeyHeader, "validation-csrf")
+	request.Header.Set("Origin", "https://app.example.test")
+	response := httptest.NewRecorder()
+	browser.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("missing CSRF status=%d", response.Code)
+	}
+	bearer := NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "automation", Roles: []auth.Role{auth.RolePlanner}, Method: auth.MethodBearer}}, ValidationBackend: backend, PublicURL: "https://app.example.test"})
+	request = httptest.NewRequest(http.MethodPost, "https://app.example.test/api/v1/validations", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(api.IdempotencyKeyHeader, "validation-bearer")
+	response = httptest.NewRecorder()
+	bearer.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("bearer status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestPhaseOneBackendErrorsAreRedacted(t *testing.T) {
 	backend := newPhaseOneBackend()
 	backend.err = errors.New("credential-sentinel /absolute/secret")
@@ -136,13 +159,19 @@ func TestPhaseOneBackendErrorsAreRedacted(t *testing.T) {
 }
 
 func phaseOneHandler(backend ValidationBackend, roles ...auth.Role) http.Handler {
-	return NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator-1", Roles: roles}}, ValidationBackend: backend})
+	return NewHandler(HandlerOptions{Authenticator: authtest.Authenticator{Actor: auth.Actor{Subject: "operator-1", Roles: roles, CSRFToken: "csrf-token"}}, ValidationBackend: backend, PublicURL: "http://localhost"})
 }
 
 func serveRequest(handler http.Handler, method, path, body, key string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	requestURL := path
+	if method == http.MethodPost && strings.HasPrefix(path, "/") {
+		requestURL = "http://localhost" + path
+	}
+	request := httptest.NewRequest(method, requestURL, strings.NewReader(body))
 	if method == http.MethodPost {
 		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", "http://localhost")
+		request.Header.Set(api.CSRFTokenHeader, "csrf-token")
 	}
 	if key != "" {
 		request.Header.Set(api.IdempotencyKeyHeader, key)

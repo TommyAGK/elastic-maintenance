@@ -95,7 +95,17 @@
           "409": {
             "$ref": "#/components/responses/APIError"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
       }
     },
     "/api/v1/openapi.json": {
@@ -537,6 +547,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
           }
         ],
         "requestBody": {
@@ -942,6 +955,189 @@
           }
         }
       }
+    },
+    "/api/v1/targets/{targetId}/readiness": {
+      "get": {
+        "operationId": "getTargetReadiness",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Safe target readiness probe",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetReadinessResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{targetId}/version": {
+      "get": {
+        "operationId": "getTargetVersion",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validated compatible Kibana version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetVersionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{targetId}/inventory": {
+      "post": {
+        "operationId": "createTargetInventory",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetID"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Live inventory job accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "415": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "429": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{targetId}/inventory/{jobId}": {
+      "get": {
+        "operationId": "getTargetInventory",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetID"
+          },
+          {
+            "$ref": "#/components/parameters/JobID"
+          },
+          {
+            "$ref": "#/components/parameters/PageSize"
+          },
+          {
+            "$ref": "#/components/parameters/PageToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live inventory job and paginated result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetInventoryRecordResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1140,7 +1336,7 @@
         "name": "X-CSRF-Token",
         "in": "header",
         "required": false,
-        "description": "Required for browser-session credential mutations; omitted for bearer automation.",
+        "description": "Required for browser cookie mutations including logout, validation, live inventory, and credential changes; omit for bearer automation where supported.",
         "schema": {
           "type": "string",
           "minLength": 32,
@@ -1520,7 +1716,8 @@
             "enum": [
               "validation",
               "plan",
-              "apply"
+              "apply",
+              "target-inventory"
             ]
           },
           "status": {
@@ -2220,6 +2417,193 @@
             "writeOnly": true
           }
         }
+      },
+      "LiveFingerprint": {
+        "type": "object",
+        "required": [
+          "algorithm",
+          "version",
+          "value"
+        ],
+        "properties": {
+          "algorithm": {
+            "type": "string",
+            "enum": [
+              "sha256"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LiveResource": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "name",
+          "manageable",
+          "projection"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "IntegrationPackage",
+              "AgentPolicy",
+              "PackagePolicy",
+              "DetectionRule",
+              "PrebuiltRules"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "manageable": {
+            "type": "boolean"
+          },
+          "fingerprint": {
+            "$ref": "#/components/schemas/LiveFingerprint"
+          },
+          "projection": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "TargetReadinessResponse": {
+        "type": "object",
+        "required": [
+          "apiVersion",
+          "targetId",
+          "ready",
+          "checkedAt"
+        ],
+        "properties": {
+          "apiVersion": {
+            "type": "string",
+            "const": "elastic-maintainer/v1alpha1"
+          },
+          "targetId": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "kibanaVersion": {
+            "type": "string"
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "failureCode": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TargetVersionResponse": {
+        "type": "object",
+        "required": [
+          "apiVersion",
+          "targetId",
+          "kibanaVersion",
+          "checkedAt"
+        ],
+        "properties": {
+          "apiVersion": {
+            "type": "string",
+            "const": "elastic-maintainer/v1alpha1"
+          },
+          "targetId": {
+            "type": "string"
+          },
+          "kibanaVersion": {
+            "type": "string"
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TargetInventoryRecordResponse": {
+        "type": "object",
+        "required": [
+          "apiVersion",
+          "targetId",
+          "job",
+          "resources"
+        ],
+        "properties": {
+          "apiVersion": {
+            "type": "string",
+            "const": "elastic-maintainer/v1alpha1"
+          },
+          "targetId": {
+            "type": "string"
+          },
+          "job": {
+            "$ref": "#/components/schemas/Job"
+          },
+          "kibanaVersion": {
+            "type": "string"
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LiveResource"
+            }
+          },
+          "nextPageToken": {
+            "type": "string"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/TargetIdentity"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TargetIdentity": {
+        "type": "object",
+        "required": [
+          "stateID",
+          "name",
+          "url",
+          "space"
+        ],
+        "properties": {
+          "stateID": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "space": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

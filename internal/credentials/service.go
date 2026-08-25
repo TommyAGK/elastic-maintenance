@@ -126,7 +126,11 @@ type Service struct {
 	storeIdentity string
 	now           func() time.Time
 	mu            sync.Mutex
+	replayMu      sync.Mutex
+	replays       map[string]credentialReplay
+	replayOrder   []string
 }
+type credentialReplay struct{ Digest, Operation string }
 type PutRequest struct{ APIKey, CACertificatePEM string }
 type Status struct {
 	Configured                   bool
@@ -149,7 +153,7 @@ func New(options Options) (*Service, error) {
 	if usage == nil {
 		return nil, errors.New("credential usage coordinator is required")
 	}
-	return &Service{config: options.Config, store: options.Store, factory: options.StoreFactory, usage: usage, now: now}, nil
+	return &Service{config: options.Config, store: options.Store, factory: options.StoreFactory, usage: usage, now: now, replays: map[string]credentialReplay{}}, nil
 }
 
 type MaterialLease struct {
@@ -338,6 +342,20 @@ func (service *Service) Put(ctx context.Context, targetID, idempotencyKey string
 	idempotencyHash := sha256.Sum256([]byte(idempotencyKey))
 	idempotency := hex.EncodeToString(idempotencyHash[:])
 	current, currentErr := store.Status(ctx, target.CredentialSecret.Name, targetID)
+	if replay, ok := service.replay(targetID, idempotency); ok {
+		if replay.Digest != requestDigest {
+			return Status{}, ErrIdempotencyConflict
+		}
+		if currentErr == nil && validStoredStatus(current) {
+			result := publicStatus(current)
+			result.Created = replay.Operation == "upload"
+			return result, nil
+		}
+		if errors.Is(currentErr, kubesecret.ErrNotFound) {
+			return Status{Configured: false}, nil
+		}
+		return Status{}, mapStoreError(currentErr)
+	}
 	if currentErr == nil && !validStoredStatus(current) {
 		return Status{}, ErrUnavailable
 	}
@@ -345,6 +363,7 @@ func (service *Service) Put(ctx context.Context, targetID, idempotencyKey string
 		if current.RequestDigest != requestDigest {
 			return Status{}, ErrIdempotencyConflict
 		}
+		service.remember(targetID, idempotency, credentialReplay{Digest: requestDigest, Operation: current.Operation})
 		result := publicStatus(current)
 		result.Created = current.Operation == "upload"
 		return result, nil
@@ -368,6 +387,7 @@ func (service *Service) Put(ctx context.Context, targetID, idempotencyKey string
 		if errors.Is(err, kubesecret.ErrConflict) {
 			retry, retryErr := store.Status(ctx, target.CredentialSecret.Name, targetID)
 			if retryErr == nil && validStoredStatus(retry) && retry.IdempotencyHash == idempotency && retry.RequestDigest == requestDigest {
+				service.remember(targetID, idempotency, credentialReplay{Digest: requestDigest, Operation: retry.Operation})
 				result := publicStatus(retry)
 				result.Created = retry.Operation == "upload"
 				return result, nil
@@ -378,6 +398,7 @@ func (service *Service) Put(ctx context.Context, targetID, idempotencyKey string
 	if !validStoredStatus(written) {
 		return Status{}, ErrUnavailable
 	}
+	service.remember(targetID, idempotency, credentialReplay{Digest: requestDigest, Operation: operation})
 	result := publicStatus(written)
 	result.Created = creating
 	return result, nil
@@ -392,21 +413,43 @@ func (service *Service) Delete(ctx context.Context, targetID, idempotencyKey str
 	}
 	service.writeMu.Lock()
 	defer service.writeMu.Unlock()
-	_, target, store, err := service.inputs(ctx, targetID)
-	if err != nil {
-		return Status{}, err
-	}
+	idempotencyHash := sha256.Sum256([]byte(idempotencyKey))
+	deleteKey := "delete:" + hex.EncodeToString(idempotencyHash[:])
+	_,target,store,err:=service.inputs(ctx,targetID)
+	if err!=nil{return Status{},err};if _,ok:=service.replay(targetID,deleteKey);ok{current,statusErr:=store.Status(ctx,target.CredentialSecret.Name,targetID);if errors.Is(statusErr,kubesecret.ErrNotFound){return Status{Configured:false},nil};if statusErr==nil&&validStoredStatus(current){return Status{},ErrIdempotencyConflict};return Status{},mapStoreError(statusErr)}
 	err = service.usage.DeleteIfUnused(ctx, targetID, func() error { return store.Delete(ctx, target.CredentialSecret.Name, targetID) })
 	if errors.Is(err, ErrInUse) {
 		return Status{}, ErrInUse
 	}
 	if errors.Is(err, kubesecret.ErrNotFound) {
+		service.remember(targetID, deleteKey, credentialReplay{Operation: "delete"})
 		return Status{Configured: false}, nil
 	}
 	if err != nil {
 		return Status{}, mapStoreError(err)
 	}
+	service.remember(targetID, deleteKey, credentialReplay{Operation: "delete"})
 	return Status{Configured: false}, nil
+}
+func (service *Service) replay(targetID, key string) (credentialReplay, bool) {
+	service.replayMu.Lock()
+	defer service.replayMu.Unlock()
+	value, ok := service.replays[targetID+"\x00"+key]
+	return value, ok
+}
+func (service *Service) remember(targetID, key string, value credentialReplay) {
+	service.replayMu.Lock()
+	defer service.replayMu.Unlock()
+	combined := targetID + "\x00" + key
+	if _, exists := service.replays[combined]; !exists {
+		if len(service.replayOrder) >= 16384 {
+			oldest := service.replayOrder[0]
+			service.replayOrder = service.replayOrder[1:]
+			delete(service.replays, oldest)
+		}
+		service.replayOrder = append(service.replayOrder, combined)
+	}
+	service.replays[combined] = value
 }
 func (service *Service) inputs(ctx context.Context, targetID string) (*config.ServerConfig, config.TargetConfig, Store, error) {
 	cfg, err := service.config.Load(ctx)

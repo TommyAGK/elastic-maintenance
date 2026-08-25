@@ -113,6 +113,7 @@ func (factory *TargetClientFactory) Acquire(ctx context.Context, targetID string
 	}
 	client := newClient(identity.URL, apiKey, httpClient, func() { transport.TLSClientConfig.RootCAs = nil; lease.Close() })
 	client.space = identity.Space
+	client.identity = identity
 	clear(apiKey)
 	success = true
 	return client, nil

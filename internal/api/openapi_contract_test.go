@@ -71,6 +71,10 @@ func TestOpenAPICoversInitialWebFirstSurface(t *testing.T) {
 		"/api/v1/targets/{targetId}",
 		"/api/v1/targets/{targetId}/credential-status",
 		"/api/v1/targets/{targetId}/credentials",
+		"/api/v1/targets/{targetId}/readiness",
+		"/api/v1/targets/{targetId}/version",
+		"/api/v1/targets/{targetId}/inventory",
+		"/api/v1/targets/{targetId}/inventory/{jobId}",
 		"/api/v1/validations",
 		"/api/v1/validations/{jobId}",
 		"/api/v1/plans",
@@ -123,6 +127,7 @@ func TestOpenAPIUnfinishedRoutesAreExplicit(t *testing.T) {
 		"GET /api/v1/sources": true, "GET /api/v1/sources/{sourceId}": true,
 		"GET /api/v1/targets": true, "GET /api/v1/targets/{targetId}": true,
 		"GET /api/v1/targets/{targetId}/credential-status": true, "PUT /api/v1/targets/{targetId}/credentials": true, "DELETE /api/v1/targets/{targetId}/credentials": true,
+		"GET /api/v1/targets/{targetId}/readiness": true, "GET /api/v1/targets/{targetId}/version": true, "POST /api/v1/targets/{targetId}/inventory": true, "GET /api/v1/targets/{targetId}/inventory/{jobId}": true,
 		"GET /api/v1/validations": true, "POST /api/v1/validations": true, "GET /api/v1/validations/{jobId}": true,
 	}
 	for path, rawPathItem := range paths {

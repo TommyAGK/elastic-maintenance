@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
 	"github.com/TommyAGK/elastic-maintenance/internal/kibana"
 	"github.com/TommyAGK/elastic-maintenance/internal/kubesecret"
+	"github.com/TommyAGK/elastic-maintenance/internal/liveinventory"
 	"github.com/TommyAGK/elastic-maintenance/internal/manifest"
 	"github.com/TommyAGK/elastic-maintenance/internal/secretmount"
 	"github.com/TommyAGK/elastic-maintenance/internal/validation"
@@ -80,18 +82,19 @@ type BrowserAuthenticator interface {
 }
 
 type HandlerOptions struct {
-	Logger            *slog.Logger
-	IsReady           func() bool
-	Authenticator     auth.Authenticator
-	Authorizer        auth.Authorizer
-	BrowserAuth       BrowserAuthenticator
-	LogoutAuth        BrowserAuthenticator
-	AuditRecorder     audit.Recorder
-	BreakGlassAuth    BreakGlassAuthenticator
-	ValidationBackend ValidationBackend
-	CredentialBackend CredentialBackend
-	PublicURL         string
-	TrustedProxies    []string
+	Logger               *slog.Logger
+	IsReady              func() bool
+	Authenticator        auth.Authenticator
+	Authorizer           auth.Authorizer
+	BrowserAuth          BrowserAuthenticator
+	LogoutAuth           BrowserAuthenticator
+	AuditRecorder        audit.Recorder
+	BreakGlassAuth       BreakGlassAuthenticator
+	ValidationBackend    ValidationBackend
+	CredentialBackend    CredentialBackend
+	LiveInventoryBackend LiveInventoryBackend
+	PublicURL            string
+	TrustedProxies       []string
 }
 
 type HTTPRuntime struct {
@@ -99,6 +102,7 @@ type HTTPRuntime struct {
 	server        *http.Server
 	validation    *validation.Service
 	targetClients *kibana.TargetClientFactory
+	liveInventory *liveinventory.Service
 	build         BuildInfo
 	ready         atomic.Bool
 }
@@ -224,8 +228,16 @@ func newHTTPRuntime(
 		listener.Close()
 		return nil, fmt.Errorf("create target client factory: %w", err)
 	}
-	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, build: build.Normalized()}
-	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
+	liveInventory, err := liveinventory.New(liveinventory.Options{Acquire: func(ctx context.Context, targetID string) (liveinventory.Client, error) {
+		return targetClients.Acquire(ctx, targetID)
+	}, QueueCapacity: 8, MaxRecords: 16})
+	if err != nil {
+		listener.Close()
+		_ = validationService.Shutdown(context.Background())
+		return nil, fmt.Errorf("create live inventory service: %w", err)
+	}
+	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, build: build.Normalized()}
+	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)
 		handlerOptions.Authenticator = auth.NewRequestAuthenticator(sessions, bearerAuth)
@@ -254,6 +266,7 @@ func (runtime *HTTPRuntime) Serve() error {
 		_ = runtime.listener.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), validationShutdownTimeout)
 		defer cancel()
+		_ = runtime.liveInventory.Shutdown(ctx)
 		_ = runtime.validation.Shutdown(ctx)
 	}
 	return err
@@ -261,6 +274,7 @@ func (runtime *HTTPRuntime) Serve() error {
 
 func (runtime *HTTPRuntime) Shutdown(ctx context.Context) error {
 	runtime.ready.Store(false)
+	liveInventoryErr := runtime.liveInventory.Shutdown(ctx)
 	serverErr := runtime.server.Shutdown(ctx)
 	listenerErr := runtime.listener.Close()
 	validationErr := runtime.validation.Shutdown(ctx)
@@ -269,6 +283,9 @@ func (runtime *HTTPRuntime) Shutdown(ctx context.Context) error {
 	}
 	if listenerErr != nil && !errors.Is(listenerErr, net.ErrClosed) {
 		return listenerErr
+	}
+	if liveInventoryErr != nil {
+		return liveInventoryErr
 	}
 	return validationErr
 }
@@ -295,6 +312,9 @@ func NewHandler(options HandlerOptions) http.Handler {
 	}
 	if options.CredentialBackend == nil {
 		options.CredentialBackend = unavailableCredentialBackend{}
+	}
+	if options.LiveInventoryBackend == nil {
+		options.LiveInventoryBackend = unavailableLiveInventory{}
 	}
 	auditRecorder := options.AuditRecorder
 	if auditRecorder == nil {
@@ -344,15 +364,15 @@ func NewHandler(options HandlerOptions) http.Handler {
 		protectedMux.Handle("/api/v1/sources", authorize(authorizer, auth.PermissionSourcesRead, readPlaceholder("source inventory")))
 		protectedMux.Handle("/api/v1/sources/", detailReadHandler("/api/v1/sources/", authorizer, auth.PermissionSourcesRead, "source inventory"))
 		protectedMux.Handle("/api/v1/targets", authorize(authorizer, auth.PermissionTargetsRead, readPlaceholder("target inventory")))
-		protectedMux.Handle("/api/v1/targets/", targetSubresourceHandler(authorizer, options.CredentialBackend, options.PublicURL, options.TrustedProxies))
+		protectedMux.Handle("/api/v1/targets/", targetSubresourceHandler(authorizer, options.CredentialBackend, options.LiveInventoryBackend, options.ValidationBackend, options.PublicURL, options.TrustedProxies))
 		protectedMux.Handle("/api/v1/validations", jobCollectionHandler(authorizer, auth.PermissionValidationsRead, auth.PermissionValidationsCreate, "validation"))
 		protectedMux.Handle("/api/v1/validations/", detailReadHandler("/api/v1/validations/", authorizer, auth.PermissionValidationsRead, "validation job"))
 	} else {
 		protectedMux.Handle("/api/v1/sources", authorize(authorizer, auth.PermissionSourcesRead, sourceCollectionHandler(options.ValidationBackend)))
 		protectedMux.Handle("/api/v1/sources/", authorize(authorizer, auth.PermissionSourcesRead, sourceDetailHandler(options.ValidationBackend)))
 		protectedMux.Handle("/api/v1/targets", authorize(authorizer, auth.PermissionTargetsRead, targetCollectionHandler(options.ValidationBackend)))
-		protectedMux.Handle("/api/v1/targets/", targetPhaseOneHandler(options.ValidationBackend, authorizer, options.CredentialBackend, options.PublicURL, options.TrustedProxies))
-		protectedMux.Handle("/api/v1/validations", validationCollectionHandler(options.ValidationBackend, authorizer))
+		protectedMux.Handle("/api/v1/targets/", targetPhaseOneHandler(options.ValidationBackend, authorizer, options.CredentialBackend, options.LiveInventoryBackend, options.PublicURL, options.TrustedProxies))
+		protectedMux.Handle("/api/v1/validations", validationCollectionHandler(options.ValidationBackend, authorizer, options.CredentialBackend, options.PublicURL, options.TrustedProxies))
 		protectedMux.Handle("/api/v1/validations/", authorize(authorizer, auth.PermissionValidationsRead, validationDetailHandler(options.ValidationBackend)))
 	}
 	protectedMux.Handle("/api/v1/plans", jobCollectionHandler(authorizer, auth.PermissionPlansRead, auth.PermissionPlansCreate, "plan"))
@@ -489,12 +509,16 @@ func detailReadHandler(prefix string, authorizer auth.Authorizer, permission aut
 	})
 }
 
-func targetSubresourceHandler(authorizer auth.Authorizer, backend CredentialBackend, publicURL string, trustedProxies []string) http.Handler {
+func targetSubresourceHandler(authorizer auth.Authorizer, backend CredentialBackend, live LiveInventoryBackend, targets ValidationBackend, publicURL string, trustedProxies []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/targets/")
 		parts := strings.Split(remainder, "/")
 		if len(parts) == 1 && requestIDPattern.MatchString(parts[0]) {
 			authorize(authorizer, auth.PermissionTargetsRead, readPlaceholder("target inventory")).ServeHTTP(w, request)
+			return
+		}
+		if len(parts) >= 2 && requestIDPattern.MatchString(parts[0]) && (parts[1] == "readiness" || parts[1] == "version" || parts[1] == "inventory") {
+			authorize(authorizer, auth.PermissionTargetsRead, targetLiveSubresourceHandler(targets, live, backend, parts[0], publicURL, trustedProxies)).ServeHTTP(w, request)
 			return
 		}
 		if len(parts) != 2 || !requestIDPattern.MatchString(parts[0]) {
@@ -541,6 +565,8 @@ func auditedMutations(recorder audit.Recorder, logger *slog.Logger, next http.Ha
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/validations" {
 			action = string(audit.ActionValidationCreate)
+		} else if r.Method == http.MethodPost && len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "targets" && requestIDPattern.MatchString(parts[3]) && parts[4] == "inventory" {
+			action = string(audit.ActionTargetInventoryCreate)
 		} else if r.Method == http.MethodPost && r.URL.Path == "/api/v1/plans" {
 			action = string(audit.ActionPlanCreate)
 		} else if r.Method == http.MethodPost && len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "plans" && requestIDPattern.MatchString(parts[3]) && parts[4] == "apply" {
@@ -584,10 +610,13 @@ func auditedAction(recorder audit.Recorder, logger *slog.Logger, action audit.Ac
 		reason := "http_" + strconv.Itoa(tracked.status)
 		event := audit.Event{OccurredAt: time.Now().UTC(), Actor: actorPtr, RequestID: RequestID(r.Context()), Action: action, Outcome: outcome, ReasonCode: reason}
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if tracked.auditJobID != "" {
+			event.JobID = tracked.auditJobID
+		}
 		if action == audit.ActionPlanApply && len(parts) >= 4 {
 			event.PlanID = parts[3]
 		}
-		if (action == audit.ActionCredentialUpload || action == audit.ActionCredentialRotate || action == audit.ActionCredentialDelete) && len(parts) >= 4 {
+		if (action == audit.ActionCredentialUpload || action == audit.ActionCredentialRotate || action == audit.ActionCredentialDelete || action == audit.ActionTargetInventoryCreate) && len(parts) >= 4 {
 			event.TargetID = parts[3]
 		}
 		if err := recorder.Record(r.Context(), event); err != nil {
@@ -705,6 +734,12 @@ func browserLogoutHandler(browser BrowserAuthenticator) http.Handler {
 		}
 		if browser == nil {
 			api.WriteError(w, request, http.StatusServiceUnavailable, "oidc_unavailable", "OIDC authentication is unavailable", RequestID(request.Context()))
+			return
+		}
+		actor, ok := auth.ActorFromContext(request.Context())
+		tokens := request.Header.Values(api.CSRFTokenHeader)
+		if !ok || actor.CSRFToken == "" || len(tokens) != 1 || len(tokens[0]) != len(actor.CSRFToken) || subtle.ConstantTimeCompare([]byte(tokens[0]), []byte(actor.CSRFToken)) != 1 {
+			api.WriteError(w, request, http.StatusBadRequest, "invalid_logout", "logout request is invalid", RequestID(request.Context()))
 			return
 		}
 		if err := browser.Logout(w, request); err != nil {
@@ -836,6 +871,7 @@ type statusWriter struct {
 	bytes       int
 	wroteHeader bool
 	auditAction audit.Action
+	auditJobID  string
 }
 
 func (writer *statusWriter) WriteHeader(status int) {

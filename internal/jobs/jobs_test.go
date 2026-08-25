@@ -182,7 +182,7 @@ func TestCanTransition(t *testing.T) {
 }
 
 func TestKnownTypesAndStatuses(t *testing.T) {
-	for _, jobType := range []Type{TypeValidation, TypePlan, TypeApply} {
+	for _, jobType := range []Type{TypeValidation, TypePlan, TypeApply, TypeTargetInventory} {
 		if !jobType.Valid() {
 			t.Errorf("type %q is not valid", jobType)
 		}
