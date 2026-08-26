@@ -1,6 +1,6 @@
 # Persisted state formats
 
-**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Phase 3 as a whole is **not passed**; filesystem safety, durable writers, recovery, planning, and API work remain later substeps.
+**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Phase 3.2 hardened state-directory runtime integration is also complete; see `docs/operations/state-directory.md` for that production contract. Phase 3 as a whole is **not passed**; durable writers/jobs/audit, recovery, planning, and API work remain later substeps.
 
 ## Contract envelope
 

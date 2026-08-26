@@ -4,12 +4,13 @@ Elastic Maintainer is being rebuilt as a web-first reconciliation service for El
 
 ## Status
 
-The repository has passed the **Phase 2: OIDC, Kubernetes Secrets, Kibana reads, and inventory API** gate and has completed **Phase 3.1: versioned non-secret state formats**. Phase 3 as a whole is not passed and the repository is not yet production-ready. Production OIDC and bearer authentication, audited break-glass access, centralized RBAC/audit hooks, least-privilege owned Kubernetes Secrets, no-readback credential workflows, leased TLS/API-key clients, bounded space-aware Kibana HTTP, complete pagination, typed canonical read adapters, target readiness/version probes, and asynchronous paginated live inventory are implemented in the API and embedded UI. Live inventory jobs and credential replay history are intentionally bounded and process-local in v1; the remaining Phase 3 work adds PVC-backed persistence, durable audit, diffing, and saved plans. The active direction is defined by:
+The repository has passed the **Phase 2: OIDC, Kubernetes Secrets, Kibana reads, and inventory API** gate and has completed **Phase 3.1: versioned non-secret state formats** and **Phase 3.2: hardened state-directory primitives/runtime integration**. Phase 3 as a whole is not passed and the repository is not yet production-ready. Production OIDC and bearer authentication, audited break-glass access, centralized RBAC/audit hooks, least-privilege owned Kubernetes Secrets, no-readback credential workflows, leased TLS/API-key clients, bounded space-aware Kibana HTTP, complete pagination, typed canonical read adapters, target readiness/version probes, and asynchronous paginated live inventory are implemented in the API and embedded UI. Live inventory jobs and credential replay history are intentionally bounded and process-local in v1; the remaining Phase 3 work adds durable jobs/audit, diffing, and saved plans. The active direction is defined by:
 
 - Primary plan: `plan.md`
 - Accepted architecture decision: `docs/architecture/0001-web-first-api.md`
 - Completed Phase 1 sub-plan: `docs/implementation/subplans/phase-1-mounted-inputs-resource-sets-and-validation-api.md`
 - Phase 3 state-format contract: `docs/state-formats.md`
+- Production state-directory contract: `docs/operations/state-directory.md`
 - Phase 3 sub-plan: `docs/implementation/subplans/phase-3-pvc-state-diff-plans-and-planning-api.md`
 - Kibana contract baseline: `docs/kibana-api-contracts.md`
 
@@ -22,7 +23,7 @@ The repository has passed the **Phase 2: OIDC, Kubernetes Secrets, Kibana reads,
 - Mounted Git/YAML resource sets remain authoritative and read-only.
 - Each Kibana target is assigned to one mounted resource set, allowing external orchestration to mount separate branches or revisions.
 - Administrators upload Kibana API keys and CA trust bundles through the protected UI/API; the service stores them in owned Kubernetes Secrets.
-- Non-secret plans, jobs, reports, audit records, and managed-resource inventory are stored as versioned JSON on a ReadWriteOnce PVC.
+- Non-secret plans, jobs, reports, audit records, and managed-resource inventory are stored as versioned JSON on a ReadWriteOnce PVC. The Linux runtime opens and holds one hardened state store for its lifetime, and readiness checks both serving state and state-directory health.
 - Docker and Kubernetes are production delivery mechanisms. `start-web.sh` is local test tooling only and is not currently tracked.
 
 ## Supported v1 resources

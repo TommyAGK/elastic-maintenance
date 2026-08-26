@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +31,8 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/liveinventory"
 	"github.com/TommyAGK/elastic-maintenance/internal/manifest"
 	"github.com/TommyAGK/elastic-maintenance/internal/secretmount"
+	"github.com/TommyAGK/elastic-maintenance/internal/state"
+	"github.com/TommyAGK/elastic-maintenance/internal/statefs"
 	"github.com/TommyAGK/elastic-maintenance/internal/validation"
 	webui "github.com/TommyAGK/elastic-maintenance/internal/web"
 )
@@ -103,8 +106,12 @@ type HTTPRuntime struct {
 	validation    *validation.Service
 	targetClients *kibana.TargetClientFactory
 	liveInventory *liveinventory.Service
+	stateStore    *statefs.Store
 	build         BuildInfo
 	ready         atomic.Bool
+	shuttingDown  atomic.Bool
+	retainState   atomic.Bool
+	lifecycleMu   sync.Mutex
 }
 
 func NewHTTPRuntime(cfg *config.ServerConfig, build BuildInfo) (Runtime, error) {
@@ -131,10 +138,44 @@ func newHTTPRuntime(
 		return nil, errors.New("server listen function is nil")
 	}
 
+	ownerUID := os.Geteuid()
+	normalizedBuild := build.Normalized()
+	stateStore, err := statefs.Open(statefs.Options{
+		StateDir:         cfg.StateDir,
+		ExpectedOwnerUID: &ownerUID,
+		MinFreeBytes:     statefs.DefaultMinFreeBytes,
+		MaxDocumentBytes: int64(state.MaxDocumentBytes),
+		LockMetadata:     statefs.LockMetadata{InstanceID: lockInstanceID(normalizedBuild)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open state directory: %w", safeStateOpenError(err))
+	}
+
 	listener, err := listen("tcp", cfg.Listen)
 	if err != nil {
+		_ = stateStore.Close()
 		return nil, fmt.Errorf("listen on configured address: %w", err)
 	}
+
+	// Keep all constructor-owned resources under one failure cleanup path. In
+	// particular, stateStore must release its process lock before returning any
+	// later authentication/service construction error.
+	var validationService *validation.Service
+	var liveInventory *liveinventory.Service
+	cleanup := true
+	defer func() {
+		if !cleanup {
+			return
+		}
+		if liveInventory != nil {
+			_ = liveInventory.Shutdown(context.Background())
+		}
+		if validationService != nil {
+			_ = validationService.Shutdown(context.Background())
+		}
+		_ = listener.Close()
+		_ = stateStore.Close()
+	}()
 
 	securityAudit := audit.LogRecorder{Logger: logger}
 	var browserAuth BrowserAuthenticator
@@ -146,7 +187,6 @@ func newHTTPRuntime(
 	if cfg.OIDC.Enabled || cfg.BreakGlass.Enabled {
 		secretReader, secretErr := secretmount.NewMountedReader(cfg.OIDC.SecretMountRoot, secretmount.DefaultMaxBytes)
 		if secretErr != nil {
-			listener.Close()
 			return nil, fmt.Errorf("open authentication secret mounts: %w", secretErr)
 		}
 		if cfg.OIDC.Enabled {
@@ -154,7 +194,6 @@ func newHTTPRuntime(
 				return securityAudit.Record(ctx, audit.Event{OccurredAt: time.Now().UTC(), Actor: &actor, RequestID: RequestID(ctx), Action: audit.ActionLogin, Outcome: audit.OutcomeSucceeded})
 			}})
 			if err != nil {
-				listener.Close()
 				return nil, fmt.Errorf("initialize OIDC authentication: %w", err)
 			}
 			browserAuth = oidcAuth
@@ -162,7 +201,6 @@ func newHTTPRuntime(
 			authenticators = append(authenticators, oidcAuth)
 			bearerAuth, err = auth.NewBearerOIDC(oidcAuth)
 			if err != nil {
-				listener.Close()
 				return nil, fmt.Errorf("initialize bearer authentication: %w", err)
 			}
 		}
@@ -187,7 +225,6 @@ func newHTTPRuntime(
 				return securityAudit.Record(ctx, audit.Event{OccurredAt: time.Now().UTC(), Actor: event.Actor, RequestID: RequestID(ctx), Action: action, Outcome: outcome, ReasonCode: event.ReasonCode})
 			}})
 			if err != nil {
-				listener.Close()
 				return nil, fmt.Errorf("initialize break-glass authentication: %w", err)
 			}
 			authenticators = append(authenticators, breakGlassAuth)
@@ -195,12 +232,11 @@ func newHTTPRuntime(
 		}
 	}
 
-	validationService, err := validation.NewService(validation.Options{
+	validationService, err = validation.NewService(validation.Options{
 		Inputs:     validation.MountedInputReader{ConfigPath: cfg.RuntimeConfigPath(), Overrides: cfg.StartupOverrides()},
 		Repository: validation.NewMemoryRepository(), Workers: 1, QueueCapacity: 32,
 	})
 	if err != nil {
-		listener.Close()
 		return nil, fmt.Errorf("create validation service: %w", err)
 	}
 	credentialUsage := credentials.NewUsageTracker()
@@ -218,26 +254,22 @@ func newHTTPRuntime(
 		return kubesecret.NewInCluster(live.SecretPolicy, live.StateID)
 	}})
 	if err != nil {
-		listener.Close()
 		return nil, fmt.Errorf("create credential service: %w", err)
 	}
 	targetClients, err := kibana.NewTargetClientFactory(kibana.TargetClientOptions{AcquireMaterial: func(ctx context.Context, targetID string) (kibana.CredentialMaterial, error) {
 		return credentialService.AcquireMaterial(ctx, targetID)
 	}})
 	if err != nil {
-		listener.Close()
 		return nil, fmt.Errorf("create target client factory: %w", err)
 	}
-	liveInventory, err := liveinventory.New(liveinventory.Options{Acquire: func(ctx context.Context, targetID string) (liveinventory.Client, error) {
+	liveInventory, err = liveinventory.New(liveinventory.Options{Acquire: func(ctx context.Context, targetID string) (liveinventory.Client, error) {
 		return targetClients.Acquire(ctx, targetID)
 	}, QueueCapacity: 8, MaxRecords: 16})
 	if err != nil {
-		listener.Close()
-		_ = validationService.Shutdown(context.Background())
 		return nil, fmt.Errorf("create live inventory service: %w", err)
 	}
-	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, build: build.Normalized()}
-	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.ready.Load, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
+	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, stateStore: stateStore, build: normalizedBuild}
+	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.isReady, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)
 		handlerOptions.Authenticator = auth.NewRequestAuthenticator(sessions, bearerAuth)
@@ -252,32 +284,109 @@ func newHTTPRuntime(
 		MaxHeaderBytes:    maxHeaderBytes,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
+	cleanup = false
 	return runtime, nil
 }
 
-func (runtime *HTTPRuntime) Serve() error {
-	runtime.ready.Store(true)
-	defer runtime.ready.Store(false)
-	err := runtime.server.Serve(runtime.listener)
-	if errors.Is(err, http.ErrServerClosed) {
+// safeStateOpenError preserves a useful category for startup diagnostics while
+// dropping implementation details such as unexpected filenames or filesystem
+// paths. Public HTTP responses remain generic as well.
+func safeStateOpenError(err error) error {
+	for _, category := range []error{
+		statefs.ErrUnsupportedPlatform,
+		statefs.ErrInvalidOptions,
+		statefs.ErrStateDirNotFound,
+		statefs.ErrStateDirIsRoot,
+		statefs.ErrStateDirNotDirectory,
+		statefs.ErrUnsafePermissions,
+		statefs.ErrUnsafeOwnership,
+		statefs.ErrSymlink,
+		statefs.ErrUnexpectedEntry,
+		statefs.ErrInsufficientFree,
+		statefs.ErrFreeSpaceUnavailable,
+		statefs.ErrAlreadyLocked,
+		statefs.ErrLockUnavailable,
+		statefs.ErrInvalidStateDir,
+	} {
+		if errors.Is(err, category) {
+			return category
+		}
+	}
+	return statefs.ErrInvalidStateDir
+}
+
+func lockInstanceID(build BuildInfo) string {
+	candidate := fmt.Sprintf("build=%s commit=%s date=%s", build.Version, build.Commit, build.Date)
+	if len(candidate) > 256 || strings.IndexFunc(candidate, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return ""
+	}
+	return candidate
+}
+
+func (runtime *HTTPRuntime) isReady() bool {
+	if runtime == nil || !runtime.ready.Load() || runtime.stateStore == nil {
+		return false
+	}
+	return runtime.stateStore.Check() == nil
+}
+
+func (runtime *HTTPRuntime) closeState() error {
+	if runtime == nil || runtime.stateStore == nil {
 		return nil
 	}
-	if err != nil {
-		_ = runtime.listener.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), validationShutdownTimeout)
-		defer cancel()
-		_ = runtime.liveInventory.Shutdown(ctx)
-		_ = runtime.validation.Shutdown(ctx)
+	return runtime.stateStore.Close()
+}
+
+func (runtime *HTTPRuntime) Serve() error {
+	runtime.lifecycleMu.Lock()
+	if runtime.shuttingDown.Load() {
+		runtime.lifecycleMu.Unlock()
+		return nil
 	}
+	runtime.ready.Store(true)
+	runtime.lifecycleMu.Unlock()
+	err := runtime.server.Serve(runtime.listener)
+	runtime.lifecycleMu.Lock()
+	runtime.ready.Store(false)
+	runtime.lifecycleMu.Unlock()
+	if errors.Is(err, http.ErrServerClosed) && runtime.shuttingDown.Load() {
+		return nil
+	}
+	// Serve returned without the coordinated Shutdown path. Force active HTTP
+	// handlers closed, stop workers, and release state only after they stop.
+	_ = runtime.server.Close()
+	_ = runtime.listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), validationShutdownTimeout)
+	defer cancel()
+	_ = runtime.liveInventory.Shutdown(ctx)
+	_ = runtime.validation.Shutdown(ctx)
+	// Server.Close cannot prove every force-closed handler returned. Retain the
+	// state descriptors and process lock until process exit.
+	runtime.retainState.Store(true)
 	return err
 }
 
 func (runtime *HTTPRuntime) Shutdown(ctx context.Context) error {
+	runtime.lifecycleMu.Lock()
+	runtime.shuttingDown.Store(true)
 	runtime.ready.Store(false)
-	liveInventoryErr := runtime.liveInventory.Shutdown(ctx)
+	runtime.lifecycleMu.Unlock()
 	serverErr := runtime.server.Shutdown(ctx)
+	if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+		runtime.retainState.Store(true)
+		_ = runtime.server.Close()
+	}
 	listenerErr := runtime.listener.Close()
+	liveInventoryErr := runtime.liveInventory.Shutdown(ctx)
 	validationErr := runtime.validation.Shutdown(ctx)
+	// Never close state underneath a worker that failed to stop. Process exit
+	// will release descriptors and locks after the lifecycle error is returned.
+	httpStopped := serverErr == nil || errors.Is(serverErr, http.ErrServerClosed)
+	if httpStopped && !runtime.retainState.Load() && liveInventoryErr == nil && validationErr == nil {
+		if stateErr := runtime.closeState(); stateErr != nil {
+			return stateErr
+		}
+	}
 	if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
 		return serverErr
 	}

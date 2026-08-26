@@ -23,6 +23,7 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/auth/authtest"
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
 	"github.com/TommyAGK/elastic-maintenance/internal/credentials"
+	"github.com/TommyAGK/elastic-maintenance/internal/statefs"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -653,6 +654,10 @@ func TestHTTPRuntimeServesAndShutsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.OIDC.Enabled = false
+	cfg.StateDir = t.TempDir()
+	if err := os.Chmod(cfg.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -672,6 +677,23 @@ func TestHTTPRuntimeServesAndShutsDown(t *testing.T) {
 	if runtime.targetClients == nil {
 		t.Fatal("target client factory was not wired")
 	}
+	if runtime.stateStore == nil {
+		t.Fatal("state store was not wired")
+	}
+	if err := runtime.stateStore.Check(); err != nil {
+		t.Fatalf("state store check before Serve = %v", err)
+	}
+	lockData, err := os.ReadFile(filepath.Join(cfg.StateDir, statefs.LocksDir, "process.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lockMetadata statefs.LockMetadata
+	if err := json.Unmarshal(lockData, &lockMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if lockMetadata.UID != os.Geteuid() || lockMetadata.Kind != statefs.LockKindProcess || !strings.Contains(lockMetadata.InstanceID, "build=dev commit=none date=unknown") {
+		t.Fatalf("lock metadata = %#v", lockMetadata)
+	}
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- runtime.Serve() }()
 
@@ -688,6 +710,40 @@ func TestHTTPRuntimeServesAndShutsDown(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ready"`) {
 		t.Fatalf("status=%d body=%q", response.StatusCode, body)
 	}
+	if err := os.Chmod(cfg.StateDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	degraded, err := client.Get("http://" + listener.Addr().String() + "/health/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	degradedBody, readErr := io.ReadAll(degraded.Body)
+	degraded.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if degraded.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(degradedBody), `"code":"not_ready"`) {
+		t.Fatalf("degraded readiness status=%d body=%q", degraded.StatusCode, degradedBody)
+	}
+	live, err := client.Get("http://" + listener.Addr().String() + "/health/live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Body.Close()
+	if live.StatusCode != http.StatusOK {
+		t.Fatalf("liveness status=%d", live.StatusCode)
+	}
+	if err := os.Chmod(cfg.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := client.Get("http://" + listener.Addr().String() + "/health/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered.Body.Close()
+	if recovered.StatusCode != http.StatusOK {
+		t.Fatalf("recovered readiness status=%d", recovered.StatusCode)
+	}
 	if runtime.build != (BuildInfo{Version: "dev", Commit: "none", Date: "unknown"}) {
 		t.Fatalf("build = %#v", runtime.build)
 	}
@@ -703,11 +759,21 @@ func TestHTTPRuntimeServesAndShutsDown(t *testing.T) {
 	if runtime.ready.Load() {
 		t.Fatal("runtime remained ready after shutdown")
 	}
+	if !errors.Is(runtime.stateStore.Check(), statefs.ErrClosed) {
+		t.Fatalf("state store was not closed: %v", runtime.stateStore.Check())
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatalf("second Shutdown() error = %v", err)
+	}
 }
 
 func TestHTTPRuntimeOIDCInitializationDoesNotContactProvider(t *testing.T) {
 	cfg, err := config.LoadServerConfig("../config/testdata/server-valid.yaml")
 	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.StateDir = t.TempDir()
+	if err := os.Chmod(cfg.StateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
@@ -731,9 +797,114 @@ func TestHTTPRuntimeOIDCInitializationDoesNotContactProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtime := runtimeValue.(*HTTPRuntime)
+	if runtime.stateStore == nil {
+		t.Fatal("OIDC runtime state store was not wired")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := runtimeValue.Shutdown(ctx); err != nil {
+	if err := runtime.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(runtime.stateStore.Check(), statefs.ErrClosed) {
+		t.Fatalf("OIDC runtime state store was not closed: %v", runtime.stateStore.Check())
+	}
+}
+
+func TestHTTPRuntimeRejectsSecondRuntimeBeforeListening(t *testing.T) {
+	cfg, err := config.LoadServerConfig("../config/testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.OIDC.Enabled = false
+	cfg.StateDir = t.TempDir()
+	if err := os.Chmod(cfg.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	firstListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := newHTTPRuntime(cfg, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), func(string, string) (net.Listener, error) {
+		return firstListener, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Shutdown(context.Background())
+
+	listenCalled := false
+	_, err = newHTTPRuntime(cfg, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), func(string, string) (net.Listener, error) {
+		listenCalled = true
+		return nil, errors.New("listener must not be reached")
+	})
+	if !errors.Is(err, statefs.ErrAlreadyLocked) || listenCalled {
+		t.Fatalf("second runtime error=%v listenCalled=%v", err, listenCalled)
+	}
+}
+
+func TestHTTPRuntimeConstructorFailureReleasesStateLock(t *testing.T) {
+	cfg, err := config.LoadServerConfig("../config/testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.OIDC.Enabled = false
+	cfg.StateDir = t.TempDir()
+	if err := os.Chmod(cfg.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = newHTTPRuntime(cfg, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), func(string, string) (net.Listener, error) {
+		return nil, errors.New("injected listener failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "listen on configured address") {
+		t.Fatalf("constructor error=%v", err)
+	}
+	ownerUID := os.Geteuid()
+	store, err := statefs.Open(statefs.Options{StateDir: cfg.StateDir, ExpectedOwnerUID: &ownerUID, MinFreeBytes: 1})
+	if err != nil {
+		t.Fatalf("state lock remained after constructor failure: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPRuntimeUnexpectedServeExitRetainsStateUntilProcessExit(t *testing.T) {
+	cfg, err := config.LoadServerConfig("../config/testdata/server-valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.OIDC.Enabled = false
+	cfg.StateDir = t.TempDir()
+	if err := os.Chmod(cfg.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeValue, err := newHTTPRuntime(cfg, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), func(string, string) (net.Listener, error) {
+		return listener, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeValue.(*HTTPRuntime)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- runtime.Serve() }()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serveResult; err == nil {
+		t.Fatal("Serve unexpectedly returned nil after an external listener close")
+	}
+	if err := runtime.stateStore.Check(); err != nil {
+		t.Fatalf("state store was not retained after forced HTTP close: %v", err)
+	}
+	if !runtime.retainState.Load() {
+		t.Fatal("forced HTTP close did not latch state retention")
+	}
+	if err := runtime.closeState(); err != nil {
 		t.Fatal(err)
 	}
 }

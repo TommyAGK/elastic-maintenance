@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1 complete; Phase 3 not passed.** The versioned non-secret state schemas and strict codecs are implemented in `internal/state`; filesystem persistence, recovery, planning, and API work remain.
+**Status: Phase 3.1 and Phase 3.2 complete; Phase 3 not passed.** The versioned non-secret state schemas and strict codecs are implemented in `internal/state`, and the hardened Linux state-directory primitives are integrated into the production HTTP runtime. Durable jobs/audit, recovery, planning, and API work remain.
 
 ## Objective
 
@@ -24,7 +24,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 7. Require explicit migration of the complete state set for any version or kind change; never migrate silently.
 8. Keep this increment directory-neutral: no filesystem persistence, locking, recovery engine, or API.
 
-### 3.2 Harden the state directory
+### 3.2 Harden the state directory — **Complete**
 
 1. Enforce expected mount, owner permissions, symlink/path defenses, and free-space checks.
 2. Implement atomic temp-write/fsync/rename.
@@ -32,6 +32,10 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 4. Detect multiple writers and fail readiness.
 5. Use ReadWriteOnce/single replica assumptions explicitly.
 6. Test corruption and interrupted writes.
+7. Open the store before listening with the effective UID, the state-schema size limit, a documented advisory free-space reserve, and bounded build/instance lock metadata.
+8. Hold the store for the runtime lifetime; release it on constructor failure, normal or unexpected serve exit, and idempotent shutdown. Readiness requires both an active server and a passing state-store check while liveness remains independent.
+
+The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
 ### 3.3 Implement durable job storage
 
