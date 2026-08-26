@@ -480,6 +480,10 @@ Provide:
 
 ## 19. Implementation phases
 
+### Incremental execution rule
+
+The authoritative phase subplans are living plans. Remaining work must be split into small, independently implementable, verifiable, reviewable, and committable increments with explicit dependencies and worker ownership. Before starting an increment, refine it further when discoveries reveal multiple behaviors, unrelated file ownership, distinct safety evidence, or an unclear commit boundary. After verification, update its status and evidence and adjust only the affected remaining increments; preserve completed history and all architecture and safety constraints. Workers may proceed in parallel only on non-overlapping boundaries, while the primary implementation thread owns sequencing and integration.
+
 ### Phase 0 — contract fixtures and API-server migration skeleton
 
 Detailed sub-plan: `docs/implementation/subplans/phase-0-contract-fixtures-and-api-server-migration-skeleton.md`
