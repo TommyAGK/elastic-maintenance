@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/TommyAGK/elastic-maintenance/internal/audit"
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
@@ -292,6 +293,20 @@ func (document Plan) Validate() error {
 		seenObservations[observation.ID] = struct{}{}
 		seenObservationIdentities[identityKey] = struct{}{}
 		previousObservation = key
+	}
+	return nil
+}
+
+// ValidateJobInterruption validates the fields supplied by the exceptional
+// queued/running to interrupted transition before a repository reads or
+// writes a record. Full state.Job validation still checks the relationship
+// between these fields and the current job's creation/start times.
+func ValidateJobInterruption(finishedAt time.Time, failureCode string) error {
+	if err := validateTime("finishedAt", finishedAt); err != nil {
+		return err
+	}
+	if err := validateCode("failureCode", failureCode); err != nil {
+		return err
 	}
 	return nil
 }

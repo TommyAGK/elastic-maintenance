@@ -1,6 +1,7 @@
 // Package jobrecord provides durable persistence for the versioned job
-// projection. It owns job-file concurrency and pagination, but deliberately
-// does not execute, recover, schedule, or expose jobs over HTTP.
+// projection. It owns job-file concurrency, the narrow exceptional recovery
+// transition, and pagination, but deliberately does not enumerate jobs for
+// startup recovery, resume, schedule, or expose jobs over HTTP.
 package jobrecord
 
 import (
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
+	"github.com/TommyAGK/elastic-maintenance/internal/jobrecovery"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
 	"github.com/TommyAGK/elastic-maintenance/internal/state"
 	"github.com/TommyAGK/elastic-maintenance/internal/statefs"
@@ -71,6 +73,7 @@ type Repository interface {
 	Create(context.Context, state.Job) (Record, error)
 	Get(context.Context, string) (Record, error)
 	Put(context.Context, string, state.Job, string) (Record, error)
+	Interrupt(context.Context, string, string, time.Time, jobrecovery.FailureCode) (Record, error)
 	List(context.Context, jobs.ListOptions) (Page, error)
 }
 
@@ -161,8 +164,10 @@ func (repository *FileRepository) Get(ctx context.Context, id string) (Record, e
 
 // Put validates a replacement for the explicitly named job, checks the
 // expected content ETag, preserves immutable/append-only metadata, and
-// requires one of jobs.CanTransition's existing status transitions. Same-status
-// cancellation mutation belongs to the later cancellation increment.
+// requires one of jobs.CanTransition's existing status transitions. The
+// exceptional queued/running-to-interrupted transition is reserved for
+// Interrupt. Same-status cancellation mutation belongs to the later
+// cancellation increment.
 func (repository *FileRepository) Put(ctx context.Context, id string, replacement state.Job, expectedETag string) (Record, error) {
 	if err := contextErr(ctx); err != nil {
 		return Record{}, err
@@ -198,8 +203,74 @@ func (repository *FileRepository) Put(ctx context.Context, id string, replacemen
 	if err := validateAppendOnlyFields(current.Job, replacement); err != nil {
 		return Record{}, err
 	}
+	if replacement.Status == jobs.StatusInterrupted && (current.Job.Status == jobs.StatusQueued || current.Job.Status == jobs.StatusRunning) {
+		// Recovery is the sole exceptional path for marking an outstanding
+		// durable record interrupted. Keep it narrow so callers cannot bypass
+		// its finish-time, failure-code, and CAS contract through Put.
+		return Record{}, jobs.ErrInvalidTransition
+	}
 	if !jobs.CanTransition(current.Job.Status, replacement.Status) {
 		return Record{}, jobs.ErrInvalidTransition
+	}
+	if err := repository.store.WriteAtomicIfMatch(jobPath(id), encoded, expectedETag); err != nil {
+		switch {
+		case errors.Is(err, statefs.ErrETagMismatch):
+			return Record{}, jobs.ErrConflict
+		case errors.Is(err, statefs.ErrNotFound):
+			return Record{}, jobs.ErrNotFound
+		default:
+			return Record{}, err
+		}
+	}
+	return Record{Job: replacement, ETag: etag(encoded)}, nil
+}
+
+// Interrupt performs the exceptional queued/running to interrupted recovery
+// transition. It validates the caller-provided finish time and failure code as
+// part of the replacement state document, preserves every existing job field
+// other than status/finish/failure, and uses the expected ETag for CAS. It
+// never changes cancellationRequested and never writes terminal records.
+func (repository *FileRepository) Interrupt(ctx context.Context, id string, expectedETag string, finishedAt time.Time, failureCode jobrecovery.FailureCode) (Record, error) {
+	if err := contextErr(ctx); err != nil {
+		return Record{}, err
+	}
+	if !jobIDPattern.MatchString(id) {
+		return Record{}, jobs.ErrNotFound
+	}
+	if err := state.ValidateJobInterruption(finishedAt, string(failureCode)); err != nil {
+		return Record{}, err
+	}
+
+	if err := repository.acquire(ctx); err != nil {
+		return Record{}, err
+	}
+	defer repository.release()
+	current, err := repository.readLocked(id)
+	if err != nil {
+		return Record{}, err
+	}
+	if !sameETag(current.ETag, expectedETag) {
+		return Record{}, jobs.ErrConflict
+	}
+	decision, policyErr := jobrecovery.ClassifyJob(current.Job)
+	if policyErr != nil {
+		return Record{}, statefs.ErrCorrupt
+	}
+	if decision.Action != jobrecovery.ActionInterrupt {
+		return Record{}, jobs.ErrInvalidTransition
+	}
+	if failureCode != decision.FailureCode {
+		return Record{}, jobrecovery.ErrInvalidFailureCode
+	}
+
+	replacement := current.Job
+	replacement.Status = jobs.StatusInterrupted
+	finish := finishedAt
+	replacement.FinishedAt = &finish
+	replacement.FailureCode = string(failureCode)
+	encoded, err := state.EncodeJob(replacement)
+	if err != nil {
+		return Record{}, err
 	}
 	if err := repository.store.WriteAtomicIfMatch(jobPath(id), encoded, expectedETag); err != nil {
 		switch {

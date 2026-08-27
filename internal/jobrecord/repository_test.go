@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
+	"github.com/TommyAGK/elastic-maintenance/internal/jobrecovery"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
 	"github.com/TommyAGK/elastic-maintenance/internal/state"
 	"github.com/TommyAGK/elastic-maintenance/internal/statefs"
@@ -561,10 +562,16 @@ func TestCreateAcceptsOnlyQueuedAndPutLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("queued to running: %v", err)
 		}
-		job.Status = status
 		finished := jobTestTime.Add(2 * time.Minute)
+		if status == jobs.StatusInterrupted {
+			if _, err := repository.Interrupt(context.Background(), job.ID, runningRecord.ETag, finished, jobrecovery.FailureCodeRunning); err != nil {
+				t.Fatalf("running to %s: %v", status, err)
+			}
+			continue
+		}
+		job.Status = status
 		job.FinishedAt = &finished
-		if status == jobs.StatusFailed || status == jobs.StatusInterrupted {
+		if status == jobs.StatusFailed {
 			job.FailureCode = "failed"
 		}
 		if _, err := repository.Put(context.Background(), job.ID, job, runningRecord.ETag); err != nil {

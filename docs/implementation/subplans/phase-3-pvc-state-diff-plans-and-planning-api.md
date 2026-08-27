@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, and Phase 3.3.1 complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, and the durable job-record repository are implemented. Recovery, remaining durable jobs/audit, planning, and API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, and Phase 3.3.2a complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, and fail-closed job recovery policy/transition are implemented. Startup recovery, remaining durable jobs/audit, planning, and API work remain.
 
 ## Objective
 
@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.1 is complete; every increment from 3.3.2 through 3.10 remains future work. Each increment is intended to be one independently reviewable, verifiable, and committable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.2a is complete; 3.3.2b through 3.10 remain future work. Each increment is intended to be one independently reviewable, verifiable, and committable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -46,16 +46,26 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 #### 3.3.1 Persist the durable job record — **Complete**
 
 - **Evidence:** `internal/jobrecord` provides a context-gated file repository over `*statefs.Store`, strict queued-only `state.Job` creation, CAS-protected transitions, restart-stable SHA-256 ETags, append-only lifecycle/result metadata, filtered snapshot-digest pagination, bounded scans, and fail-closed corruption/unsafe-entry handling. `internal/statefs.Store.WriteAtomicIfMatch` holds the store lock through metadata validation, content ETag comparison, and replacement; `ReadDocuments` returns sorted defensive bytes under one lock with 10,000-record and 32 MiB aggregate bounds, while `ListDocuments` remains metadata-only.
-- **Verification:** Focused `internal/jobrecord`, `internal/state`, and `internal/statefs` tests cover lifecycle fixtures/links, transitions/immutability/ETags, concurrent CAS conflict, filtering/token scope and changed snapshots, corruption, unsafe entries, aggregate bounds, gate cancellation, and secret-safe errors. `go test ./internal/statefs ./internal/jobrecord`, `go test -race ./internal/statefs ./internal/jobrecord`, `go test ./...`, `go vet ./...`, and `git diff --check` pass. No recovery, idempotency index, scheduler, HTTP/SSE, runtime migration, or cancellation mutation is included.
-- **Next:** 3.3.2 — recover jobs safely after restart.
+- **Verification:** Focused `internal/jobrecord`, `internal/state`, and `internal/statefs` tests cover lifecycle fixtures/links, transitions/immutability/ETags, concurrent CAS conflict, filtering/token scope and changed snapshots, corruption, unsafe entries, aggregate bounds, gate cancellation, and secret-safe errors. `go test ./internal/statefs ./internal/jobrecord`, `go test -race ./internal/statefs ./internal/jobrecord`, `go test ./...`, `go vet ./...`, and `git diff --check` pass. No startup recovery, idempotency index, scheduler, HTTP/SSE, runtime migration, or cancellation mutation is included.
+- **Next:** 3.3.2b — scan and recover durable jobs at startup.
 
-#### 3.3.2 Recover jobs safely after restart
+#### 3.3.2a Define fail-closed recovery policy and transitions — **Complete**
 
-- **Scope:** Define and apply an explicit recovery classification for each existing `internal/jobs` `Type`: restore only queued or in-flight work declared safe to continue, mark interrupted non-resumable work as `interrupted`, and preserve terminal records. Do not infer safety or resume a remote mutation implicitly.
-- **Dependencies:** 3.3.1; `internal/jobs` transitions/types and the Phase 1 substeps 1.7–1.8 job-execution interfaces for the existing job types.
-- **Definition of done:** Recovery is deterministic, bounded, and fail-closed for malformed or ambiguous records; each recovered job has an accurate existing status and safe diagnostic, and no remote side effect is resumed without an explicit job-type policy. Types without an approved safe-resume contract are marked `interrupted` rather than guessed safe.
-- **Focused verification:** Restart fixtures covering queued, running, succeeded, failed, canceled, and interrupted records for every existing `internal/jobs.Type` (`validation`, `plan`, `apply`, and `target-inventory`), malformed records, and an interrupted non-resumable job prove no false success, duplicate completion, or unsafe resume. Verify recovery leaves unrelated records readable.
-- **Worker boundary:** A recovery worker owns startup classification and migration-free recovery of job records; it does not own queue limits, idempotency, remote reads, or API presentation.
+- **Scope:** Define a pure recovery classification for every existing `internal/jobs.Type` and status, plus a dedicated CAS-protected repository transition from queued/running to `interrupted`. Terminal records are preserved. No current job type may be declared resumable until its complete durable input and side-effect policy exists; apply is always non-resumable.
+- **Dependencies:** 3.3.1 and the existing `internal/jobs` type/status contracts.
+- **Definition of done:** Classification is deterministic and exhaustive; nonterminal jobs without an approved safe-resume contract receive a bounded safe interruption code and finish time, while terminal records remain byte-unchanged. The dedicated recovery transition cannot mutate identities, links, prior start time, or terminal records and is safe under stale ETags.
+- **Focused verification:** Table-test every status for validation, plan, apply, and target-inventory jobs; test queued/running interruption, terminal preservation, stale ETags, repeated classification, timestamp bounds, and secret-safe errors.
+- **Evidence:** `internal/jobrecovery/recovery.go` classifies all four current job types across all six statuses, preserves terminal jobs, interrupts queued/running jobs, uses bounded constant codes with apply-specific queued/running codes, and returns safe sentinel errors for invalid inputs. `internal/jobrecord/repository.go` adds the context-gated `Interrupt` CAS transition with state validation, immutable/link/started-time preservation, terminal rejection, and safe missing/stale mappings. `internal/jobrecovery/recovery_test.go` and `internal/jobrecord/interrupt_test.go` cover the full matrix, serialization, timestamp/code validation, metadata/cancellation preservation, terminal/repeat behavior, CAS races, context cancellation, and sentinel-safe errors.
+- **Verification:** `gofmt -w internal/jobrecovery/recovery.go internal/jobrecovery/recovery_test.go internal/jobrecord/repository.go internal/jobrecord/interrupt_test.go`; `go test ./internal/jobrecovery ./internal/jobrecord`; `go test -race ./internal/jobrecovery ./internal/jobrecord`; `go test ./...`; `go vet ./...`; and `git diff --check` pass. No startup enumeration/runtime wiring, scheduler, idempotency, HTTP/SSE, or cancellation mutation is included.
+- **Worker boundary:** A recovery-policy worker owns pure classification and the narrow repository recovery transition only; it does not enumerate startup state, wire runtime startup, schedule jobs, or resume execution.
+
+#### 3.3.2b Scan and recover durable jobs at startup
+
+- **Scope:** Enumerate one coherent bounded job snapshot before schedulers start, apply 3.3.2a decisions with CAS, and expose a bounded recovery summary. Fail startup on malformed, ambiguous, or concurrently changing records; never infer success or resume a remote mutation.
+- **Dependencies:** 3.3.2a and the Phase 3.2 runtime state-store lifecycle.
+- **Definition of done:** Startup recovery is deterministic, idempotent after partial interruption, runs before listening/scheduling, marks every non-resumable queued/running record accurately, preserves terminal records, and leaves unrelated records readable.
+- **Focused verification:** Restart fixtures cover all statuses/types, malformed records, stale concurrent updates, partial recovery rerun, constructor cleanup, and no-listener-on-failure behavior.
+- **Worker boundary:** A startup-recovery worker owns bounded enumeration, orchestration, summary, and runtime startup integration; it does not own queue limits, idempotency, remote reads, HTTP presentation, or execution resumption.
 
 #### 3.3.3 Persist scoped idempotency results
 
@@ -67,8 +77,8 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 
 #### 3.3.4 Bound execution independently of browser connections
 
-- **Scope:** Add the durable-job scheduler/executor limits for configured concurrency and queue size, and make job execution continue or terminate according to the explicit per-type recovery classification from 3.3.2 rather than the lifetime of a browser connection.
-- **Dependencies:** 3.3.1 and 3.3.2; `internal/jobs.Queue` and `CancellationPolicy` contracts plus Phase 1 substeps 1.7–1.8 and Phase 2 substep 2.10 job-execution interfaces.
+- **Scope:** Add the durable-job scheduler/executor limits for configured concurrency and queue size, and make job execution continue or terminate according to the explicit per-type recovery classification from 3.3.2a after startup recovery in 3.3.2b rather than the lifetime of a browser connection.
+- **Dependencies:** 3.3.1 and 3.3.2b; `internal/jobs.Queue` and `CancellationPolicy` contracts plus Phase 1 substeps 1.7–1.8 and Phase 2 substep 2.10 job-execution interfaces.
 - **Definition of done:** Queue admission, concurrency, overload, shutdown, and disconnected-client behavior are bounded and observable through durable job state. No job requires an attached browser or open HTTP response to finish safely.
 - **Focused verification:** Fill the queue, exceed concurrency, disconnect polling/SSE clients, restart during queued/running work, and shut down with pending work. Verify bounded resource use, accurate final states, and no duplicate execution caused by disconnects.
 - **Worker boundary:** A scheduler worker owns queue admission, worker lifetimes, and concurrency limits; it does not own persisted record formats, idempotency lookup, event serialization, or planning logic.

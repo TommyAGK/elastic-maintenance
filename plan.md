@@ -514,7 +514,7 @@ Gate: authenticated roles and Secret ownership controls pass; break-glass admini
 
 ### Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1 and 3.2 complete; Phase 3 not passed.**
+**Status: Phase 3.1, 3.2, 3.3.1, and 3.3.2a complete; Phase 3 not passed.**
 
 Detailed sub-plan: `docs/implementation/subplans/phase-3-pvc-state-diff-plans-and-planning-api.md`
 
