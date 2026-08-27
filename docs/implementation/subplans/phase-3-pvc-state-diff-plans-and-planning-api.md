@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1 and Phase 3.2 complete; Phase 3 not passed.** The versioned non-secret state schemas and strict codecs are implemented in `internal/state`, and the hardened Linux state-directory primitives are integrated into the production HTTP runtime. Durable jobs/audit, recovery, planning, and API work remain.
+**Status: Phase 3.1, Phase 3.2, and Phase 3.3.1 complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, and the durable job-record repository are implemented. Recovery, remaining durable jobs/audit, planning, and API work remain.
 
 ## Objective
 
@@ -37,19 +37,17 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** Every increment from 3.3 through 3.10 remains future work. Each increment is intended to be one independently reviewable, verifiable, and committable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.1 is complete; every increment from 3.3.2 through 3.10 remains future work. Each increment is intended to be one independently reviewable, verifiable, and committable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
 ### 3.3 Implement durable job storage
 
-#### 3.3.1 Persist the durable job record
+#### 3.3.1 Persist the durable job record — **Complete**
 
-- **Scope:** Define the job record and state-store operations for the existing `queued`, `running`, `succeeded`, `failed`, `canceled`, and `interrupted` statuses (`canceled` is the existing API spelling of the high-level task's `cancelled`), including actor, request, and result metadata needed by job consumers. Use the completed state codecs and atomic state-directory primitives; do not add a job kind or change the API workflow.
-- **Dependencies:** 3.1 and 3.2; `internal/jobs` `Job`, `Type`, and `Status` contracts plus the Phase 1 substeps 1.7–1.8 and Phase 2 substep 2.10 asynchronous-job contracts.
-- **Definition of done:** A strict, versioned, non-secret job record can be created, updated through the existing valid transitions, read, and atomically persisted. Terminal results and safe failure information survive process exit without storing credentials or request bodies.
-- **Focused verification:** Unit-test valid/invalid transitions, all six statuses, strict decode/encode, duplicate IDs, bounded fields, atomic replacement, and a reopen/read round trip. Scan serialized fixtures for API keys, CA bodies, OIDC tokens, cookies, and Secret bodies.
-- **Worker boundary:** A durable-state worker owns job-file persistence through the completed state-directory store and codecs; directory-neutral `internal/state` remains schema/validation only. It hands a durable record contract to scheduling/API workers and does not implement queue execution, HTTP routes, or SSE.
+- **Evidence:** `internal/jobrecord` provides a context-gated file repository over `*statefs.Store`, strict queued-only `state.Job` creation, CAS-protected transitions, restart-stable SHA-256 ETags, append-only lifecycle/result metadata, filtered snapshot-digest pagination, bounded scans, and fail-closed corruption/unsafe-entry handling. `internal/statefs.Store.WriteAtomicIfMatch` holds the store lock through metadata validation, content ETag comparison, and replacement; `ReadDocuments` returns sorted defensive bytes under one lock with 10,000-record and 32 MiB aggregate bounds, while `ListDocuments` remains metadata-only.
+- **Verification:** Focused `internal/jobrecord`, `internal/state`, and `internal/statefs` tests cover lifecycle fixtures/links, transitions/immutability/ETags, concurrent CAS conflict, filtering/token scope and changed snapshots, corruption, unsafe entries, aggregate bounds, gate cancellation, and secret-safe errors. `go test ./internal/statefs ./internal/jobrecord`, `go test -race ./internal/statefs ./internal/jobrecord`, `go test ./...`, `go vet ./...`, and `git diff --check` pass. No recovery, idempotency index, scheduler, HTTP/SSE, runtime migration, or cancellation mutation is included.
+- **Next:** 3.3.2 — recover jobs safely after restart.
 
 #### 3.3.2 Recover jobs safely after restart
 

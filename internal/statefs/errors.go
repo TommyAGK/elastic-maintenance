@@ -39,6 +39,10 @@ var (
 	ErrDocumentTooLarge     = errors.New("state document exceeds the size limit")
 	ErrDestinationExists    = errors.New("state document already exists")
 	ErrCorrupt              = errors.New("state document is corrupt")
+	ErrTooManyDocuments     = errors.New("state document directory has too many entries")
+	ErrAggregateTooLarge    = errors.New("state document directory exceeds the aggregate size limit")
+	ErrETagMismatch         = errors.New("state document ETag does not match")
+	ErrInvalidReadBounds    = errors.New("invalid state document read bounds")
 )
 
 // LockConflictError identifies a non-blocking lock conflict without exposing

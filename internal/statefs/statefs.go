@@ -3,6 +3,7 @@ package statefs
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,8 @@ const (
 	maxLockMetadataBytes = 4096
 	maxRelativePathBytes = 512
 	maxComponentBytes    = 255
+	maxListedDocuments   = 10000
+	maxAggregateBytes    = 32 << 20
 )
 
 type fileMetadata struct {
@@ -30,6 +33,13 @@ type fileMetadata struct {
 	nlink uint64
 	isDir bool
 	isReg bool
+}
+
+// Document is one defensively copied named state document returned by
+// ReadDocuments. Name is a basename, never a filesystem path.
+type Document struct {
+	Name string
+	Data []byte
 }
 
 // LockKind identifies the scope of an advisory lock.
@@ -769,6 +779,228 @@ func (store *Store) cleanupTemporaryFiles() error {
 	return nil
 }
 
+// ListDocuments enumerates one exact controlled document directory without
+// reading document contents. Every entry must be an owner-only, single-link
+// regular JSON document within the configured size bound. The returned names
+// are basenames, never filesystem paths, and are sorted lexicographically.
+// Callers that need a coherent content snapshot must use ReadDocuments.
+func (store *Store) ListDocuments(directoryName string) ([]string, error) {
+	if store == nil {
+		return nil, ErrClosed
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.checkOpenLocked(); err != nil {
+		return nil, err
+	}
+
+	var directory *os.File
+	for _, name := range controlledDirectories {
+		if name == directoryName && name != LocksDir {
+			directory = store.dirs[name]
+			break
+		}
+	}
+	if directory == nil {
+		return nil, &InvalidPathError{Reason: "path is outside controlled document directories"}
+	}
+	if err := store.validateControlledDirectory(directory); err != nil {
+		return nil, err
+	}
+	if _, err := directory.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("%w: reset document enumeration", ErrInvalidStateDir)
+	}
+	entries, err := directory.Readdirnames(maxListedDocuments + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: enumerate document directory", ErrInvalidStateDir)
+	}
+	if len(entries) > maxListedDocuments {
+		return nil, ErrTooManyDocuments
+	}
+
+	result := make([]string, 0, len(entries))
+	for _, name := range entries {
+		// Directory enumeration cannot return a slash, but retain the explicit
+		// component checks so this primitive remains fail-closed if its
+		// platform implementation changes.
+		if !validDocumentEntryName(name) {
+			return nil, ErrUnexpectedEntry
+		}
+		file, openErr := openDocumentFile(directory, name)
+		if openErr != nil {
+			if errors.Is(openErr, ErrSymlink) || isSymlinkError(openErr) {
+				return nil, ErrSymlink
+			}
+			return nil, ErrFileUnavailable
+		}
+		metadata, inspectErr := inspectFile(file)
+		if inspectErr != nil {
+			_ = file.Close()
+			return nil, ErrFileUnavailable
+		}
+		if validateErr := validateDocumentMetadata(metadata, store.ownerUID); validateErr != nil {
+			_ = file.Close()
+			return nil, validateErr
+		}
+		info, statErr := file.Stat()
+		_ = file.Close()
+		if statErr != nil {
+			return nil, ErrFileUnavailable
+		}
+		if info.Size() < 0 || info.Size() > store.maxBytes {
+			return nil, ErrDocumentTooLarge
+		}
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+// ReadDocuments returns one coherent, sorted snapshot of an exact controlled
+// document directory. It validates every name, file's metadata, and file size
+// while holding Store.mu, enforces both bounds before allocating the aggregate
+// contents, and returns defensive byte slices.
+func (store *Store) ReadDocuments(directoryName string, maxCount int, maxTotalBytes int64) ([]Document, error) {
+	if store == nil {
+		return nil, ErrClosed
+	}
+	if maxCount <= 0 || maxTotalBytes <= 0 {
+		return nil, ErrInvalidReadBounds
+	}
+	if maxCount > maxListedDocuments {
+		maxCount = maxListedDocuments
+	}
+	if maxTotalBytes > maxAggregateBytes {
+		maxTotalBytes = maxAggregateBytes
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.checkOpenLocked(); err != nil {
+		return nil, err
+	}
+
+	var directory *os.File
+	for _, name := range controlledDirectories {
+		if name == directoryName && name != LocksDir {
+			directory = store.dirs[name]
+			break
+		}
+	}
+	if directory == nil {
+		return nil, &InvalidPathError{Reason: "path is outside controlled document directories"}
+	}
+	if err := store.validateControlledDirectory(directory); err != nil {
+		return nil, err
+	}
+	if _, err := directory.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("%w: reset document enumeration", ErrInvalidStateDir)
+	}
+	entries, err := directory.Readdirnames(maxCount + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: enumerate document directory", ErrInvalidStateDir)
+	}
+	if len(entries) > maxCount {
+		return nil, ErrTooManyDocuments
+	}
+
+	// Validate all metadata and sizes before reading any bytes. This both makes
+	// the bound decision deterministic and avoids a partial snapshot on an
+	// unsafe entry.
+	var total int64
+	for _, name := range entries {
+		if !validDocumentEntryName(name) {
+			return nil, ErrUnexpectedEntry
+		}
+		file, openErr := openDocumentFile(directory, name)
+		if openErr != nil {
+			if errors.Is(openErr, ErrSymlink) || isSymlinkError(openErr) {
+				return nil, ErrSymlink
+			}
+			return nil, ErrFileUnavailable
+		}
+		metadata, inspectErr := inspectFile(file)
+		if inspectErr != nil {
+			_ = file.Close()
+			return nil, ErrFileUnavailable
+		}
+		if validateErr := validateDocumentMetadata(metadata, store.ownerUID); validateErr != nil {
+			_ = file.Close()
+			return nil, validateErr
+		}
+		info, statErr := file.Stat()
+		_ = file.Close()
+		if statErr != nil {
+			return nil, ErrFileUnavailable
+		}
+		if info.Size() < 0 || info.Size() > store.maxBytes {
+			return nil, ErrDocumentTooLarge
+		}
+		if info.Size() > maxTotalBytes-total {
+			return nil, ErrAggregateTooLarge
+		}
+		total += info.Size()
+	}
+
+	sort.Strings(entries)
+	result := make([]Document, 0, len(entries))
+	var readTotal int64
+	for _, name := range entries {
+		file, openErr := openDocumentFile(directory, name)
+		if openErr != nil {
+			if errors.Is(openErr, ErrSymlink) || isSymlinkError(openErr) {
+				return nil, ErrSymlink
+			}
+			return nil, ErrFileUnavailable
+		}
+		metadata, inspectErr := inspectFile(file)
+		if inspectErr != nil {
+			_ = file.Close()
+			return nil, ErrFileUnavailable
+		}
+		if validateErr := validateDocumentMetadata(metadata, store.ownerUID); validateErr != nil {
+			_ = file.Close()
+			return nil, validateErr
+		}
+		info, statErr := file.Stat()
+		if statErr != nil {
+			_ = file.Close()
+			return nil, ErrFileUnavailable
+		}
+		if info.Size() < 0 || info.Size() > store.maxBytes {
+			_ = file.Close()
+			return nil, ErrDocumentTooLarge
+		}
+		remaining := maxTotalBytes - readTotal
+		data, readErr := io.ReadAll(io.LimitReader(file, remaining+1))
+		_ = file.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("%w: read document", ErrFileUnavailable)
+		}
+		if int64(len(data)) > store.maxBytes {
+			return nil, ErrDocumentTooLarge
+		}
+		if int64(len(data)) > remaining {
+			return nil, ErrAggregateTooLarge
+		}
+		readTotal += int64(len(data))
+		result = append(result, Document{Name: name, Data: append([]byte(nil), data...)})
+	}
+	return result, nil
+}
+
+func validDocumentEntryName(name string) bool {
+	if name == "" || name == ".json" || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+		return false
+	}
+	base := strings.TrimSuffix(name, ".json")
+	if base == "" || strings.ContainsRune(name, '\x00') || strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\') {
+		return false
+	}
+	_, err := CanonicalID(base)
+	return err == nil
+}
+
 // Read reads one direct child document under a fixed controlled directory.
 func (store *Store) Read(relative string) ([]byte, error) {
 	if store == nil {
@@ -779,6 +1011,12 @@ func (store *Store) Read(relative string) ([]byte, error) {
 	if err := store.checkOpenLocked(); err != nil {
 		return nil, err
 	}
+	return store.readLocked(relative)
+}
+
+// readLocked is the non-locking implementation shared by Read and CAS. The
+// caller must hold Store.mu.
+func (store *Store) readLocked(relative string) ([]byte, error) {
 	directory, name, err := store.documentLocation(relative)
 	if err != nil {
 		return nil, err
@@ -819,13 +1057,46 @@ func (store *Store) Read(relative string) ([]byte, error) {
 	if int64(len(data)) > store.maxBytes {
 		return nil, ErrDocumentTooLarge
 	}
-	return data, nil
+	return append([]byte(nil), data...), nil
 }
 
 // WriteAtomic atomically writes data. The replace argument directly selects
 // replace versus rename-no-replace behavior.
 func (store *Store) WriteAtomic(relative string, data []byte, replace bool) error {
 	return store.writeAtomic(relative, data, replace)
+}
+
+// WriteAtomicIfMatch atomically replaces an existing document only when its
+// SHA-256 content ETag matches expectedETag. The destination must exist. The
+// store mutex remains held across destination metadata validation, content
+// reading and comparison, and replacement, so repositories sharing one Store
+// cannot lose an update or recreate a deleted document.
+func (store *Store) WriteAtomicIfMatch(relative string, replacement []byte, expectedETag string) error {
+	if store == nil {
+		return ErrClosed
+	}
+	if int64(len(replacement)) > MaxDocumentBytes {
+		return ErrDocumentTooLarge
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.checkOpenLocked(); err != nil {
+		return err
+	}
+	if int64(len(replacement)) > store.maxBytes {
+		return ErrDocumentTooLarge
+	}
+
+	current, err := store.readLocked(relative)
+	if err != nil {
+		return err
+	}
+	actual := sha256.Sum256(current)
+	actualETag := hex.EncodeToString(actual[:])
+	if len(expectedETag) != len(actualETag) || subtle.ConstantTimeCompare([]byte(actualETag), []byte(expectedETag)) != 1 {
+		return ErrETagMismatch
+	}
+	return store.writeAtomicLocked(relative, replacement, true)
 }
 
 func (store *Store) writeAtomic(relative string, data []byte, replace bool) (result error) {
@@ -840,6 +1111,10 @@ func (store *Store) writeAtomic(relative string, data []byte, replace bool) (res
 	if err := store.checkOpenLocked(); err != nil {
 		return err
 	}
+	return store.writeAtomicLocked(relative, data, replace)
+}
+
+func (store *Store) writeAtomicLocked(relative string, data []byte, replace bool) (result error) {
 	if int64(len(data)) > store.maxBytes {
 		return ErrDocumentTooLarge
 	}
@@ -1237,9 +1512,46 @@ func (store *Store) ReadStateDocument(relative string) (state.Document, error) {
 	}
 	document, err := state.DecodeDocument(encoded)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
+		// Decoder diagnostics can contain attacker-controlled headers, field
+		// names, or values. Preserve only the safe error class, never the
+		// original diagnostic text.
+		return nil, safeStateDecodeFailure(err)
 	}
 	return document, nil
+}
+
+func safeStateDecodeFailure(original error) error {
+	class := state.ErrInvalidDocument
+	switch {
+	case errors.Is(original, state.ErrDocumentTooLarge):
+		class = state.ErrDocumentTooLarge
+	case errors.Is(original, state.ErrUnsupportedVersion):
+		class = state.ErrUnsupportedVersion
+	case errors.Is(original, state.ErrUnsupportedKind):
+		class = state.ErrUnsupportedKind
+	case errors.Is(original, state.ErrTrailingJSON):
+		class = state.ErrTrailingJSON
+	case errors.Is(original, state.ErrDuplicateField):
+		class = state.ErrDuplicateField
+	}
+	return &safeStateDecodeError{class: class}
+}
+
+type safeStateDecodeError struct{ class error }
+
+func (err *safeStateDecodeError) Error() string { return fmt.Sprintf("%v: %v", ErrCorrupt, err.class) }
+func (err *safeStateDecodeError) Unwrap() error { return err.class }
+func (err *safeStateDecodeError) Is(target error) bool {
+	if target == ErrCorrupt {
+		return true
+	}
+	if err.class == state.ErrUnsupportedVersion && target == state.ErrMigrationRequired {
+		return true
+	}
+	if err.class == state.ErrDocumentTooLarge && target == ErrDocumentTooLarge {
+		return true
+	}
+	return false
 }
 
 // Remove atomically removes a regular, owner-only, single-link document and

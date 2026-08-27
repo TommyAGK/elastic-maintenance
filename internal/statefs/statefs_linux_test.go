@@ -3,6 +3,8 @@
 package statefs
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TommyAGK/elastic-maintenance/internal/state"
 	"golang.org/x/sys/unix"
 )
 
@@ -347,6 +350,47 @@ func TestAtomicWriteSafetyAndVisibility(t *testing.T) {
 		t.Fatalf("write hook called %d times", writes.Load())
 	}
 	shortStore.Close()
+}
+
+func TestReadStateDocumentRedactsDecoderDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	store := openTestStore(t, dir, hooks{})
+	sentinel := "OIDC_TOKEN_SENTINEL_MUST_NOT_ESCAPE"
+	data := []byte(`{"apiVersion":"` + sentinel + `","kind":"Job"}`)
+	if err := store.WriteAtomic("plans/bad.json", data, false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.ReadStateDocument("plans/bad.json")
+	if !errors.Is(err, ErrCorrupt) || strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("redacted state error=%v", err)
+	}
+	if !errors.Is(err, state.ErrUnsupportedVersion) || !errors.Is(err, state.ErrMigrationRequired) {
+		t.Fatalf("state error class=%v", err)
+	}
+}
+
+func TestAtomicCompareAndSwapRequiresMatchingExistingContent(t *testing.T) {
+	dir := t.TempDir()
+	store := openTestStore(t, dir, hooks{})
+	if err := store.WriteAtomic("plans/state.json", []byte("old"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAtomicIfMatch("plans/missing.json", []byte("new"), ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing CAS error=%v", err)
+	}
+	if err := store.WriteAtomicIfMatch("plans/state.json", []byte("new"), "wrong"); !errors.Is(err, ErrETagMismatch) {
+		t.Fatalf("mismatched CAS error=%v", err)
+	}
+	if got, err := store.Read("plans/state.json"); err != nil || string(got) != "old" {
+		t.Fatalf("mismatched CAS changed document=%q err=%v", got, err)
+	}
+	digest := sha256.Sum256([]byte("old"))
+	if err := store.WriteAtomicIfMatch("plans/state.json", []byte("new"), hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.Read("plans/state.json"); err != nil || string(got) != "new" {
+		t.Fatalf("successful CAS document=%q err=%v", got, err)
+	}
 }
 
 func TestInterruptedWritesPreserveOldDocumentAndCleanTemp(t *testing.T) {
