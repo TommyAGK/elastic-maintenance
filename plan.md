@@ -514,11 +514,13 @@ Gate: authenticated roles and Secret ownership controls pass; break-glass admini
 
 ### Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, 3.2, 3.3.1, and 3.3.2a complete; Phase 3 not passed.**
+**Status: Phase 3.1, 3.2, 3.3.1, 3.3.2a, and 3.3.2b complete; Phase 3 not passed.**
 
 Detailed sub-plan: `docs/implementation/subplans/phase-3-pvc-state-diff-plans-and-planning-api.md`
 
 - Implement file state, jobs, audit, inventory/journals, ownership, DAG/diff, saved plans, planning API, and plan-review UI.
+- **3.3.2b complete:** `internal/jobrecord.FileRepository.Recover` performs one bounded coherent jobs snapshot, validates/classifies all records before CAS interruption, preserves terminal bytes, and returns identifier-free counts; `internal/server` runs it once at `time.Now().UTC()` after `statefs.Open` and before listening, with safe failure cleanup. Focused recovery and restart tests cover matrix/statuses, malformed and concurrent state, reruns, bounds, and listener/lock behavior.
+- **Next:** 3.3.3 — persist scoped idempotency results. Scheduler/executor, HTTP/SSE, cancellation mutation, audit, diffing, and saved plans remain future work.
 
 Gate: deterministic non-secret plans are source/target scoped and cannot authorize prune without inventory plus marker.
 

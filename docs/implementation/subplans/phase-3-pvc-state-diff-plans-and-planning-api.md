@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, and Phase 3.3.2a complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, and fail-closed job recovery policy/transition are implemented. Startup recovery, remaining durable jobs/audit, planning, and API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, and Phase 3.3.2b complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, and bounded startup job recovery are implemented. Idempotency, scheduling, remaining durable jobs/audit, planning, and API work remain.
 
 ## Objective
 
@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.2a is complete; 3.3.2b through 3.10 remain future work. Each increment is intended to be one independently reviewable, verifiable, and committable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.2b is complete; 3.3.3 through 3.10 remain future work. Each increment is intended to be one independently reviewable, verifiable, and committable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -59,13 +59,16 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Verification:** `gofmt -w internal/jobrecovery/recovery.go internal/jobrecovery/recovery_test.go internal/jobrecord/repository.go internal/jobrecord/interrupt_test.go`; `go test ./internal/jobrecovery ./internal/jobrecord`; `go test -race ./internal/jobrecovery ./internal/jobrecord`; `go test ./...`; `go vet ./...`; and `git diff --check` pass. No startup enumeration/runtime wiring, scheduler, idempotency, HTTP/SSE, or cancellation mutation is included.
 - **Worker boundary:** A recovery-policy worker owns pure classification and the narrow repository recovery transition only; it does not enumerate startup state, wire runtime startup, schedule jobs, or resume execution.
 
-#### 3.3.2b Scan and recover durable jobs at startup
+#### 3.3.2b Scan and recover durable jobs at startup — **Complete**
 
 - **Scope:** Enumerate one coherent bounded job snapshot before schedulers start, apply 3.3.2a decisions with CAS, and expose a bounded recovery summary. Fail startup on malformed, ambiguous, or concurrently changing records; never infer success or resume a remote mutation.
 - **Dependencies:** 3.3.2a and the Phase 3.2 runtime state-store lifecycle.
 - **Definition of done:** Startup recovery is deterministic, idempotent after partial interruption, runs before listening/scheduling, marks every non-resumable queued/running record accurately, preserves terminal records, and leaves unrelated records readable.
-- **Focused verification:** Restart fixtures cover all statuses/types, malformed records, stale concurrent updates, partial recovery rerun, constructor cleanup, and no-listener-on-failure behavior.
+- **Focused verification:** `internal/jobrecord/recovery_test.go` covers all four types and six statuses, exact summary counts and policy codes, terminal byte preservation, malformed-later and wrong-filename zero-mutation behavior, one-scan bounds, future timestamps, cancellation, safe sentinels, and rerun idempotency. `internal/server/recovery_test.go` pre-seeds queued/running/terminal state and proves recovery completes before the listener callback, rejects malformed startup state without listening, and releases the state lock for reopen.
+- **Evidence:** `FileRepository.Recover` acquires the repository gate, calls `Store.ReadDocuments` once with `MaxRecordsScan`/`MaxTotalBytes`, decodes and classifies the complete sorted snapshot before preparing any write, and uses store-level CAS writes for queued/running records only. `HTTPRuntime` constructs the durable repository and invokes recovery at one `time.Now().UTC()` immediately after `statefs.Open`, before listening or service construction; it retains the repository/summary, logs only three bounded counts, and maps recovery failures to safe categories.
+- **Verification:** `gofmt` on the changed Go files; focused `go test ./internal/jobrecovery ./internal/jobrecord ./internal/server`; focused and full race tests; `go test ./...`; `go vet ./...`; and `git diff --check`. No scheduler, idempotency, HTTP/SSE, or cancellation mutation is included.
 - **Worker boundary:** A startup-recovery worker owns bounded enumeration, orchestration, summary, and runtime startup integration; it does not own queue limits, idempotency, remote reads, HTTP presentation, or execution resumption.
+- **Next:** 3.3.3 — persist scoped idempotency results.
 
 #### 3.3.3 Persist scoped idempotency results
 

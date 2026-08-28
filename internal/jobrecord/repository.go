@@ -1,7 +1,7 @@
 // Package jobrecord provides durable persistence for the versioned job
-// projection. It owns job-file concurrency, the narrow exceptional recovery
-// transition, and pagination, but deliberately does not enumerate jobs for
-// startup recovery, resume, schedule, or expose jobs over HTTP.
+// projection. It owns job-file concurrency, bounded startup recovery, the
+// narrow exceptional recovery transition, and pagination, but deliberately
+// does not resume, schedule, or expose jobs over HTTP.
 package jobrecord
 
 import (
@@ -49,6 +49,21 @@ var (
 	// ErrPageChanged means a page token no longer describes the same filtered
 	// record snapshot. Callers must restart pagination from the first page.
 	ErrPageChanged = errors.New("job record page snapshot changed")
+	// ErrRecovery is the safe top-level startup recovery failure. Recovery
+	// errors never include persisted document diagnostics or identifiers.
+	ErrRecovery = errors.New("job recovery failed")
+	// ErrRecoveryCorrupt means the bounded startup snapshot contained an
+	// unusable or semantically unsafe durable record.
+	ErrRecoveryCorrupt = errors.New("job recovery found corrupt state")
+	// ErrRecoveryConflict means a record changed or disappeared after the
+	// coherent snapshot and before its CAS interruption.
+	ErrRecoveryConflict = errors.New("job recovery encountered concurrent state change")
+	// ErrRecoveryScanLimit means the bounded startup snapshot exceeded one of
+	// its fixed record or aggregate-byte limits.
+	ErrRecoveryScanLimit = errors.New("job recovery scan limit exceeded")
+	// ErrInvalidRecoveryTimestamp means the caller did not supply one usable,
+	// non-future UTC recovery timestamp.
+	ErrInvalidRecoveryTimestamp = errors.New("invalid job recovery timestamp")
 
 	jobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
@@ -67,6 +82,14 @@ type Page struct {
 	NextPageToken string   `json:"nextPageToken,omitempty"`
 }
 
+// RecoverySummary is the bounded, identifier-free result of one successful
+// startup recovery pass. The counts are at most MaxRecordsScan.
+type RecoverySummary struct {
+	Examined    int `json:"examined"`
+	Preserved   int `json:"preserved"`
+	Interrupted int `json:"interrupted"`
+}
+
 // Repository is the durable job-record contract. Create and Put accept the
 // state projection rather than Record so callers cannot manufacture an ETag.
 type Repository interface {
@@ -74,6 +97,7 @@ type Repository interface {
 	Get(context.Context, string) (Record, error)
 	Put(context.Context, string, state.Job, string) (Record, error)
 	Interrupt(context.Context, string, string, time.Time, jobrecovery.FailureCode) (Record, error)
+	Recover(context.Context, time.Time) (RecoverySummary, error)
 	List(context.Context, jobs.ListOptions) (Page, error)
 }
 
@@ -82,8 +106,9 @@ type Repository interface {
 // a complete List, relative to other operations on this instance; Store's
 // mutex provides the shared-store serialization needed by CAS writes.
 type FileRepository struct {
-	gate  chan struct{}
-	store *statefs.Store
+	gate                chan struct{}
+	store               *statefs.Store
+	recoveryBeforeWrite func()
 }
 
 var _ Repository = (*FileRepository)(nil)
@@ -252,6 +277,95 @@ func (repository *FileRepository) Interrupt(ctx context.Context, id string, expe
 	if !sameETag(current.ETag, expectedETag) {
 		return Record{}, jobs.ErrConflict
 	}
+	return repository.interruptRecordLocked(current, finishedAt, failureCode)
+}
+
+// Recover takes one coherent, bounded snapshot of the jobs directory, fully
+// decodes and classifies it before the first mutation, then CAS-interrupts
+// every queued/running record. Terminal records are not rewritten. The caller
+// supplies one UTC timestamp so every interruption in a pass has the exact
+// same finish time. A non-nil error invalidates the returned summary; callers
+// can safely retry because completed interruptions are terminal and preserved
+// by the next pass.
+func (repository *FileRepository) Recover(ctx context.Context, finishedAt time.Time) (RecoverySummary, error) {
+	if err := contextErr(ctx); err != nil {
+		return RecoverySummary{}, recoveryContextError(err)
+	}
+	if err := validateRecoveryTimestamp(finishedAt); err != nil {
+		return RecoverySummary{}, errors.Join(ErrRecovery, ErrInvalidRecoveryTimestamp)
+	}
+	if err := repository.acquire(ctx); err != nil {
+		return RecoverySummary{}, recoveryContextError(err)
+	}
+	defer repository.release()
+
+	documents, err := repository.store.ReadDocuments(statefs.JobsDir, MaxRecordsScan, MaxTotalBytes)
+	if err != nil {
+		return RecoverySummary{}, mapRecoverySnapshotError(err)
+	}
+	if err := contextErr(ctx); err != nil {
+		return RecoverySummary{}, recoveryContextError(err)
+	}
+
+	type candidate struct {
+		name         string
+		expectedETag string
+		replacement  []byte
+	}
+	candidates := make([]candidate, 0, len(documents))
+	summary := RecoverySummary{Examined: len(documents)}
+	for _, document := range documents {
+		if err := contextErr(ctx); err != nil {
+			return RecoverySummary{}, recoveryContextError(err)
+		}
+		id := strings.TrimSuffix(document.Name, ".json")
+		record, decodeErr := decodeRecord(id, document.Data)
+		if decodeErr != nil {
+			return RecoverySummary{}, mapRecoverySnapshotError(decodeErr)
+		}
+		decision, classifyErr := jobrecovery.ClassifyJob(record.Job)
+		if classifyErr != nil {
+			return RecoverySummary{}, errors.Join(ErrRecovery, ErrRecoveryCorrupt)
+		}
+		switch decision.Action {
+		case jobrecovery.ActionPreserve:
+			summary.Preserved++
+		case jobrecovery.ActionInterrupt:
+			replacement, encodeErr := interruptionReplacement(record.Job, finishedAt, decision.FailureCode)
+			if encodeErr != nil {
+				return RecoverySummary{}, errors.Join(ErrRecovery, ErrRecoveryCorrupt)
+			}
+			candidates = append(candidates, candidate{name: document.Name, expectedETag: record.ETag, replacement: replacement})
+		default:
+			return RecoverySummary{}, errors.Join(ErrRecovery, ErrRecoveryCorrupt)
+		}
+	}
+
+	// All decoding, validation, policy classification, and replacement encoding
+	// above precede the first write. CAS remains the authority if another
+	// repository changes or removes a file after this snapshot.
+	if err := contextErr(ctx); err != nil {
+		return RecoverySummary{}, recoveryContextError(err)
+	}
+	for _, item := range candidates {
+		if err := contextErr(ctx); err != nil {
+			return RecoverySummary{}, recoveryContextError(err)
+		}
+		if repository.recoveryBeforeWrite != nil {
+			repository.recoveryBeforeWrite()
+		}
+		if err := repository.store.WriteAtomicIfMatch(jobPath(strings.TrimSuffix(item.name, ".json")), item.replacement, item.expectedETag); err != nil {
+			return RecoverySummary{}, mapRecoveryMutationError(err)
+		}
+		summary.Interrupted++
+	}
+	if err := contextErr(ctx); err != nil {
+		return RecoverySummary{}, recoveryContextError(err)
+	}
+	return summary, nil
+}
+
+func (repository *FileRepository) interruptRecordLocked(current Record, finishedAt time.Time, failureCode jobrecovery.FailureCode) (Record, error) {
 	decision, policyErr := jobrecovery.ClassifyJob(current.Job)
 	if policyErr != nil {
 		return Record{}, statefs.ErrCorrupt
@@ -262,17 +376,11 @@ func (repository *FileRepository) Interrupt(ctx context.Context, id string, expe
 	if failureCode != decision.FailureCode {
 		return Record{}, jobrecovery.ErrInvalidFailureCode
 	}
-
-	replacement := current.Job
-	replacement.Status = jobs.StatusInterrupted
-	finish := finishedAt
-	replacement.FinishedAt = &finish
-	replacement.FailureCode = string(failureCode)
-	encoded, err := state.EncodeJob(replacement)
+	encoded, err := interruptionReplacement(current.Job, finishedAt, failureCode)
 	if err != nil {
 		return Record{}, err
 	}
-	if err := repository.store.WriteAtomicIfMatch(jobPath(id), encoded, expectedETag); err != nil {
+	if err := repository.store.WriteAtomicIfMatch(jobPath(current.Job.ID), encoded, current.ETag); err != nil {
 		switch {
 		case errors.Is(err, statefs.ErrETagMismatch):
 			return Record{}, jobs.ErrConflict
@@ -282,7 +390,68 @@ func (repository *FileRepository) Interrupt(ctx context.Context, id string, expe
 			return Record{}, err
 		}
 	}
-	return Record{Job: replacement, ETag: etag(encoded)}, nil
+	return Record{Job: interruptedJob(current.Job, finishedAt, failureCode), ETag: etag(encoded)}, nil
+}
+
+func interruptionReplacement(current state.Job, finishedAt time.Time, failureCode jobrecovery.FailureCode) ([]byte, error) {
+	replacement := interruptedJob(current, finishedAt, failureCode)
+	return state.EncodeJob(replacement)
+}
+
+func interruptedJob(current state.Job, finishedAt time.Time, failureCode jobrecovery.FailureCode) state.Job {
+	replacement := current
+	replacement.Status = jobs.StatusInterrupted
+	finish := finishedAt
+	replacement.FinishedAt = &finish
+	replacement.FailureCode = string(failureCode)
+	return replacement
+}
+
+func validateRecoveryTimestamp(value time.Time) error {
+	if value.IsZero() || value.Location() != time.UTC || value.After(time.Now().UTC()) {
+		return ErrInvalidRecoveryTimestamp
+	}
+	return nil
+}
+
+func recoveryContextError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return errors.Join(ErrRecovery, context.Canceled)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(ErrRecovery, context.DeadlineExceeded)
+	}
+	return ErrRecovery
+}
+
+func mapRecoveryMutationError(err error) error {
+	switch {
+	case errors.Is(err, statefs.ErrETagMismatch), errors.Is(err, statefs.ErrNotFound):
+		return errors.Join(ErrRecovery, ErrRecoveryConflict)
+	case errors.Is(err, statefs.ErrCorrupt):
+		return errors.Join(ErrRecovery, ErrRecoveryCorrupt, statefs.ErrCorrupt)
+	case errors.Is(err, statefs.ErrFileUnavailable), errors.Is(err, statefs.ErrUnexpectedEntry), errors.Is(err, statefs.ErrDocumentTooLarge), errors.Is(err, statefs.ErrSymlink), errors.Is(err, statefs.ErrNotRegular), errors.Is(err, statefs.ErrHardLinked), errors.Is(err, statefs.ErrUnsafeFile), errors.Is(err, statefs.ErrUnsafePermissions), errors.Is(err, statefs.ErrUnsafeOwnership):
+		return errors.Join(ErrRecovery, ErrRecoveryCorrupt)
+	default:
+		return ErrRecovery
+	}
+}
+
+func mapRecoverySnapshotError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return recoveryContextError(context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return recoveryContextError(context.DeadlineExceeded)
+	case errors.Is(err, statefs.ErrTooManyDocuments), errors.Is(err, statefs.ErrAggregateTooLarge):
+		return errors.Join(ErrRecovery, ErrRecoveryScanLimit)
+	case errors.Is(err, statefs.ErrCorrupt):
+		return errors.Join(ErrRecovery, ErrRecoveryCorrupt, statefs.ErrCorrupt)
+	case errors.Is(err, statefs.ErrFileUnavailable), errors.Is(err, statefs.ErrUnexpectedEntry), errors.Is(err, statefs.ErrDocumentTooLarge), errors.Is(err, statefs.ErrSymlink), errors.Is(err, statefs.ErrNotRegular), errors.Is(err, statefs.ErrHardLinked), errors.Is(err, statefs.ErrUnsafeFile), errors.Is(err, statefs.ErrUnsafePermissions), errors.Is(err, statefs.ErrUnsafeOwnership):
+		return errors.Join(ErrRecovery, ErrRecoveryCorrupt)
+	default:
+		return ErrRecovery
+	}
 }
 
 // List returns a complete, strictly decoded snapshot of the bounded jobs

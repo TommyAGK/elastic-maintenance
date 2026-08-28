@@ -51,3 +51,13 @@ remain no-replace. On the next open, interrupted `.statefs-tmp-*` files are
 validated and removed safely. A temporary file left by the Linux no-replace
 link fallback may be removed after its destination is confirmed, preserving the
 committed destination.
+
+After the state store opens, the runtime performs one bounded, coherent read of
+the jobs directory before invoking the listener or constructing services. Every
+record is strictly decoded, checked against its filename, and classified before
+any CAS interruption. Queued and running records are marked `interrupted` with
+one UTC recovery timestamp and the policy failure code; terminal records are
+not rewritten. Malformed, ambiguous, over-bound, or concurrently changed state
+fails startup with a safe category and releases the process lock. A retry is
+safe after partial progress because interrupted records are terminal and
+preserved.

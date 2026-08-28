@@ -25,6 +25,7 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/auth"
 	"github.com/TommyAGK/elastic-maintenance/internal/config"
 	"github.com/TommyAGK/elastic-maintenance/internal/credentials"
+	"github.com/TommyAGK/elastic-maintenance/internal/jobrecord"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
 	"github.com/TommyAGK/elastic-maintenance/internal/kibana"
 	"github.com/TommyAGK/elastic-maintenance/internal/kubesecret"
@@ -107,6 +108,8 @@ type HTTPRuntime struct {
 	targetClients *kibana.TargetClientFactory
 	liveInventory *liveinventory.Service
 	stateStore    *statefs.Store
+	jobRepository *jobrecord.FileRepository
+	recovery      jobrecord.RecoverySummary
 	build         BuildInfo
 	ready         atomic.Bool
 	shuttingDown  atomic.Bool
@@ -151,8 +154,28 @@ func newHTTPRuntime(
 		return nil, fmt.Errorf("open state directory: %w", safeStateOpenError(err))
 	}
 
+	jobRepository, err := jobrecord.New(stateStore)
+	if err != nil {
+		_ = stateStore.Close()
+		return nil, fmt.Errorf("create durable job repository: %w", safeJobRecoveryError(err))
+	}
+	recoveryAt := time.Now().UTC()
+	recoverySummary, err := jobRepository.Recover(context.Background(), recoveryAt)
+	if err != nil {
+		_ = stateStore.Close()
+		return nil, fmt.Errorf("recover durable jobs: %w", safeJobRecoveryError(err))
+	}
+	logger.Info("durable job recovery complete",
+		slog.Int("examined", recoverySummary.Examined),
+		slog.Int("preserved", recoverySummary.Preserved),
+		slog.Int("interrupted", recoverySummary.Interrupted),
+	)
+
 	listener, err := listen("tcp", cfg.Listen)
 	if err != nil {
+		if listener != nil {
+			_ = listener.Close()
+		}
 		_ = stateStore.Close()
 		return nil, fmt.Errorf("listen on configured address: %w", err)
 	}
@@ -268,7 +291,7 @@ func newHTTPRuntime(
 	if err != nil {
 		return nil, fmt.Errorf("create live inventory service: %w", err)
 	}
-	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, stateStore: stateStore, build: normalizedBuild}
+	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, stateStore: stateStore, jobRepository: jobRepository, recovery: recoverySummary, build: normalizedBuild}
 	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.isReady, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)
@@ -286,6 +309,29 @@ func newHTTPRuntime(
 	}
 	cleanup = false
 	return runtime, nil
+}
+
+// safeJobRecoveryError retains only bounded recovery categories. In
+// particular, persisted decoder errors are never returned with their field,
+// value, or document ID diagnostics.
+func safeJobRecoveryError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return errors.Join(jobrecord.ErrRecovery, context.Canceled)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(jobrecord.ErrRecovery, context.DeadlineExceeded)
+	}
+	for _, category := range []error{
+		jobrecord.ErrRecoveryCorrupt,
+		jobrecord.ErrRecoveryConflict,
+		jobrecord.ErrRecoveryScanLimit,
+		jobrecord.ErrInvalidRecoveryTimestamp,
+	} {
+		if errors.Is(err, category) {
+			return errors.Join(jobrecord.ErrRecovery, category)
+		}
+	}
+	return jobrecord.ErrRecovery
 }
 
 // safeStateOpenError preserves a useful category for startup diagnostics while

@@ -1,6 +1,6 @@
 # Persisted state formats
 
-**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Phase 3.2 hardened state-directory runtime integration, Phase 3.3.1 durable job-record persistence, and Phase 3.3.2a fail-closed recovery policy/transition are also complete; see `docs/operations/state-directory.md` for that production contract. Phase 3 as a whole is **not passed**; startup recovery, remaining durable jobs/audit, planning, and API work remain later substeps.
+**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Phase 3.2 hardened state-directory runtime integration, Phase 3.3.1 durable job-record persistence, Phase 3.3.2a fail-closed recovery policy/transition, and Phase 3.3.2b bounded startup job recovery are also complete; see `docs/operations/state-directory.md` for that production contract. Phase 3 as a whole is **not passed**; idempotency, scheduling, remaining durable jobs/audit, planning, and API work remain later substeps.
 
 ## Contract envelope
 
@@ -83,7 +83,7 @@ Non-mutating outcomes (`unchanged`, `conflict`, `skip`, and `reject`) are observ
 
 ### `Job`
 
-Is the durable projection of `jobs.Job`. It stores actor subject/roles/auth method, request metadata, idempotency key/request digest, and safe plan/report/failure links. It contains no request body, credentials, headers, or remote response. `interrupted` is terminal. Restart recovery preserves an existing running `startedAt`; a queued job interrupted before execution keeps `startedAt` absent, and both receive a validated `finishedAt` plus policy-defined safe failure code.
+Is the durable projection of `jobs.Job`. It stores actor subject/roles/auth method, request metadata, idempotency key/request digest, and safe plan/report/failure links. It contains no request body, credentials, headers, or remote response. `interrupted` is terminal. Startup recovery takes one bounded coherent jobs snapshot, validates and classifies every record before its first write, preserves terminal bytes, and CAS-interrupts queued/running records before the listener starts. It preserves an existing running `startedAt`; a queued job interrupted before execution keeps `startedAt` absent, and both receive one canonical UTC `finishedAt` plus a policy-defined safe failure code. Malformed, ambiguous, over-bound, or concurrently changed records fail closed without exposing document contents or IDs.
 
 ### `Report`
 
