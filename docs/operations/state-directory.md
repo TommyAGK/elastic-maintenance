@@ -21,11 +21,22 @@ OIDC tokens, session material, and certificate bodies never belong here.
   `state.MaxDocumentBytes` limit when opening the filesystem store.
 
 The fixed state subdirectories are `config-snapshots`, `sources`,
-`inventories`, `journals`, `plans`, `jobs`, `reports`, `audit`, and `locks`.
+`inventories`, `journals`, `plans`, `jobs`, `reports`, `audit`, `idempotency`,
+and `locks`. The `idempotency` directory contains only deterministic,
+non-secret scoped idempotency records. Idempotency capacity coordination uses a
+separate fixed-name idempotency lock in `locks`; it is not a job lock.
 Unexpected root entries, symlinks in controlled paths, unsafe ownership or
 permissions on the root/controlled directories and lock files, special files,
 and hard links fail closed. Documents are checked with the same policy when
 read, written, or removed.
+
+### Pre-release layout compatibility
+
+Adding `idempotency/` is not a state-document schema migration: it is a new
+fixed directory, and no document kind or version changed. An older binary that
+rejects unexpected root entries will nevertheless reject a state directory
+opened by this binary. Do not roll back that directory in place; use a verified
+backup/restore procedure to return to an older binary.
 
 ## Space and readiness
 
@@ -33,7 +44,9 @@ The runtime uses `statefs.DefaultMinFreeBytes` (64 MiB) as a preflight,
 advisory free-space reserve. It is not a quota and cannot guarantee that a
 subsequent write will succeed. A failed preflight or later filesystem health
 check makes startup fail or readiness return `503 Service Unavailable`.
-Liveness remains independent of state health.
+Liveness remains independent of state health. Idempotency callers receive a
+safe `ErrUnavailable` for free-space, write, durability, and lock-operation
+failures; malformed or unsafe durable state remains `ErrCorrupt`.
 
 Unsafe root, controlled-directory, process-lock, ownership, permission, or
 free-space state fails startup and readiness. Unsafe document objects fail
@@ -61,3 +74,14 @@ not rewritten. Malformed, ambiguous, over-bound, or concurrently changed state
 fails startup with a safe category and releases the process lock. A retry is
 safe after partial progress because interrupted records are terminal and
 preserved.
+
+Idempotency admission accepts a caller-supplied canonical UTC `at` and
+requires a new or replacement candidate's `CreatedAt` to equal `at` exactly (a
+replay candidate may retain its original creation time). It never derives
+expiry from a wall clock. At the 10,000-record limit, the capacity lock
+coordinates a bounded scan and
+ETag-conditional removal of records expired at `at`. Nil-expiry records are
+never reclaimed, and a concurrently completed or replaced record is preserved
+when its ETag no longer matches. Expiry controls replay retention: completion
+may still succeed after expiry if its ETag matches, but reclamation or
+replacement can win first and make the old ETag fail.

@@ -1,6 +1,6 @@
 # Persisted state formats
 
-**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Phase 3.2 hardened state-directory runtime integration, Phase 3.3.1 durable job-record persistence, Phase 3.3.2a fail-closed recovery policy/transition, and Phase 3.3.2b bounded startup job recovery are also complete; see `docs/operations/state-directory.md` for that production contract. Phase 3 as a whole is **not passed**; idempotency, scheduling, remaining durable jobs/audit, planning, and API work remain later substeps.
+**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Phase 3.3.3 adds repository behavior without changing this state schema or version. Phase 3.2 hardened state-directory runtime integration, Phase 3.3.1 durable job-record persistence, Phase 3.3.2a fail-closed recovery policy/transition, Phase 3.3.2b bounded startup job recovery, and Phase 3.3.3 durable scoped idempotency persistence are also complete; see `docs/operations/state-directory.md` for that production contract. Phase 3 as a whole is **not passed**; scheduling, remaining durable jobs/audit, planning, and API work remain later substeps.
 
 ## Contract envelope
 
@@ -91,7 +91,9 @@ Contains safe target and operation outcomes. Operation actions remain mutation a
 
 ### `Idempotency`
 
-Binds an idempotency key to an actor, a bounded namespaced action, and a request digest. `result` is an optional typed `{kind,id}` reference whose kind is `job`, `plan`, `report`, or `credential-mutation`; credential-mutation IDs may identify a durable idempotency/result record. A pending record requires a job ID and a nil (omitted or JSON-null) result. A terminal record requires a typed result and may omit the job ID for synchronous mutations. A job result must match the record's job ID.
+Binds an idempotency key to an actor, a bounded namespaced action, and a request digest. The durable repository stores each record under a domain-separated SHA-256 hash of the exact normalized actor/action/key scope; the request digest is a conflict discriminator and is not part of that hash. `result` is an optional typed `{kind,id}` reference whose kind is `job`, `plan`, `report`, or `credential-mutation`; credential-mutation IDs may identify a durable idempotency/result record. A pending record requires a job ID and a nil (omitted or JSON-null) result. A terminal record requires a typed result and may omit the job ID for synchronous mutations. A job result must match the record's job ID.
+
+`CreateOrReplay` takes an explicit caller-supplied canonical UTC observation time `at`; a new or replacement candidate's `CreatedAt` must exactly equal `at` (a replay candidate may retain the original creation time). Expiry decisions use only `at`, never an implicit candidate timestamp or wall clock. Expiry is inclusive at `ExpiresAt`; nil expiry never expires. Expiry governs replay retention, not completion: a pending record may be completed after expiry while its ETag still matches. Capacity reclamation or replacement may win first, in which case the old ETag fails. Expired replacement is a CAS operation and requires the replacement's canonical `CreatedAt` to be at or after the prior `ExpiresAt`.
 
 ### `AuditEvent`
 
@@ -108,3 +110,5 @@ Actor state contains only subject, sorted unique known roles, and authentication
 There is **no silent migration**. `elastic-maintainer/state/v1alpha1` is an immutable lockstep state-set contract. Changing the API version **or changing any kind in the state set** requires an explicit, reviewed migration of the complete state set; a kind must not be changed independently while leaving the rest of the state set silently readable. A document with another version is rejected as unsupported.
 
 An explicit offline migration must read the old version with its old strict decoder, validate the complete old state set, produce a new-version state set, validate every new document, and write it separately with an operator-visible migration report. The online service must not migrate state during startup, reads, writes, recovery, or API requests. Destructive or lossy conversions require explicit operator approval and a backup/rollback plan.
+
+Adding the fixed `idempotency/` directory is a pre-release state-layout change, not a state-document schema migration: no document kind or version changed. However, once this binary has opened a state directory, an older binary that rejects the new directory cannot roll back in place. Use a backup/restore procedure to return to an older binary.

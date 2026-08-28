@@ -393,6 +393,65 @@ func TestAtomicCompareAndSwapRequiresMatchingExistingContent(t *testing.T) {
 	}
 }
 
+func TestRemoveIfMatchIsDescriptorRelativeAndCASSafe(t *testing.T) {
+	dir := t.TempDir()
+	store := openTestStore(t, dir, hooks{})
+	if err := store.WriteAtomic("plans/state.json", []byte("old"), false); err != nil {
+		t.Fatal(err)
+	}
+	oldETag := sha256.Sum256([]byte("old"))
+	oldETagText := hex.EncodeToString(oldETag[:])
+	if err := store.RemoveIfMatch("plans/missing.json", oldETagText); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing conditional remove error=%v", err)
+	}
+	if err := store.RemoveIfMatch("plans/state.json", "wrong"); !errors.Is(err, ErrETagMismatch) {
+		t.Fatalf("mismatched conditional remove error=%v", err)
+	}
+	if err := store.WriteAtomic("plans/state.json", []byte("new"), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveIfMatch("plans/state.json", oldETagText); !errors.Is(err, ErrETagMismatch) {
+		t.Fatalf("changed conditional remove error=%v", err)
+	}
+	if got, err := store.Read("plans/state.json"); err != nil || string(got) != "new" {
+		t.Fatalf("changed document=%q err=%v", got, err)
+	}
+	newETag := sha256.Sum256([]byte("new"))
+	if err := store.RemoveIfMatch("plans/state.json", hex.EncodeToString(newETag[:])); err != nil {
+		t.Fatalf("successful conditional remove error=%v", err)
+	}
+	if _, err := store.Read("plans/state.json"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removed document read error=%v", err)
+	}
+}
+
+func TestRemoveRetainsHardenedValidation(t *testing.T) {
+	dir := t.TempDir()
+	store := openTestStore(t, dir, hooks{})
+	if err := store.Remove("plans/missing.json"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing remove error=%v", err)
+	}
+	if err := store.WriteAtomic("plans/state.json", []byte("old"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove("plans/state.json"); err != nil {
+		t.Fatalf("remove error=%v", err)
+	}
+	if _, err := store.Read("plans/state.json"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removed document read error=%v", err)
+	}
+	oversizedPath := filepath.Join(dir, PlansDir, "oversized.json")
+	if err := os.WriteFile(oversizedPath, make([]byte, MaxDocumentBytes+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove("plans/oversized.json"); !errors.Is(err, ErrDocumentTooLarge) {
+		t.Fatalf("oversized remove error=%v", err)
+	}
+	if _, err := os.Stat(oversizedPath); err != nil {
+		t.Fatalf("unsafe oversized document was removed: %v", err)
+	}
+}
+
 func TestInterruptedWritesPreserveOldDocumentAndCleanTemp(t *testing.T) {
 	dir := t.TempDir()
 	var calls atomic.Int64
@@ -411,7 +470,7 @@ func TestInterruptedWritesPreserveOldDocumentAndCleanTemp(t *testing.T) {
 	if err := store.WriteAtomic("plans/state.json", []byte("before"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.WriteAtomic("plans/state.json", []byte("after"), true); !errors.Is(err, ErrCorrupt) {
+	if err := store.WriteAtomic("plans/state.json", []byte("after"), true); !errors.Is(err, ErrWriteFailed) {
 		t.Fatalf("interrupted write error = %v", err)
 	}
 	if got, err := store.Read("plans/state.json"); err != nil || string(got) != "before" {
@@ -455,7 +514,7 @@ func TestFsyncRenameAndFreeSpaceFailures(t *testing.T) {
 	if err := store.WriteAtomic("plans/state.json", []byte("old"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.WriteAtomic("plans/state.json", []byte("new"), true); !errors.Is(err, ErrCorrupt) {
+	if err := store.WriteAtomic("plans/state.json", []byte("new"), true); !errors.Is(err, ErrWriteFailed) {
 		t.Fatalf("fsync error = %v", err)
 	}
 	if got, err := store.Read("plans/state.json"); err != nil || string(got) != "old" {
@@ -472,7 +531,7 @@ func TestFsyncRenameAndFreeSpaceFailures(t *testing.T) {
 			return removeAt(dir, name)
 		},
 	})
-	if err := store.WriteAtomic("plans/state.json", []byte("data"), false); !errors.Is(err, ErrCorrupt) {
+	if err := store.WriteAtomic("plans/state.json", []byte("data"), false); !errors.Is(err, ErrWriteFailed) {
 		t.Fatalf("rename error = %v", err)
 	}
 	if removed.Load() != 1 {
@@ -615,6 +674,9 @@ func TestReadRejectsSymlinksHardLinksSpecialFilesAndOversize(t *testing.T) {
 	if _, err := store.Read("plans/link.json"); !errors.Is(err, ErrSymlink) {
 		t.Fatalf("document symlink read error = %v", err)
 	}
+	if err := store.RemoveIfMatch("plans/link.json", "anything"); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("document symlink conditional remove error = %v", err)
+	}
 	if err := store.WriteAtomic("plans/link.json", []byte("x"), true); !errors.Is(err, ErrSymlink) {
 		t.Fatalf("document symlink write error = %v", err)
 	}
@@ -635,6 +697,9 @@ func TestReadRejectsSymlinksHardLinksSpecialFilesAndOversize(t *testing.T) {
 	if _, err := store.Read("plans/hard.json"); !errors.Is(err, ErrHardLinked) {
 		t.Fatalf("hard link read error = %v", err)
 	}
+	if err := store.RemoveIfMatch("plans/hard.json", "anything"); !errors.Is(err, ErrHardLinked) {
+		t.Fatalf("hard link conditional remove error = %v", err)
+	}
 	if err := store.WriteAtomic("plans/hard.json", []byte("x"), true); !errors.Is(err, ErrHardLinked) {
 		t.Fatalf("hard link write error = %v", err)
 	}
@@ -645,6 +710,9 @@ func TestReadRejectsSymlinksHardLinksSpecialFilesAndOversize(t *testing.T) {
 	}
 	if _, err := store.Read("plans/dir.json"); !errors.Is(err, ErrNotRegular) {
 		t.Fatalf("directory read error = %v", err)
+	}
+	if err := store.RemoveIfMatch("plans/dir.json", "anything"); !errors.Is(err, ErrNotRegular) {
+		t.Fatalf("directory conditional remove error = %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(plans, "big.json"), []byte("0123456789"), 0600); err != nil {
 		t.Fatal(err)

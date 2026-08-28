@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, and Phase 3.3.2b complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, and bounded startup job recovery are implemented. Idempotency, scheduling, remaining durable jobs/audit, planning, and API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, and Phase 3.3.3 complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, and durable scoped idempotency persistence are implemented. Scheduling, remaining durable jobs/audit, planning, and API work remain.
 
 ## Objective
 
@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.2b is complete; 3.3.3 through 3.10 remain future work. Each increment is intended to be one independently reviewable, verifiable, and committable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.3 is complete; 3.3.4 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -68,15 +68,17 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Evidence:** `FileRepository.Recover` acquires the repository gate, calls `Store.ReadDocuments` once with `MaxRecordsScan`/`MaxTotalBytes`, decodes and classifies the complete sorted snapshot before preparing any write, and uses store-level CAS writes for queued/running records only. `HTTPRuntime` constructs the durable repository and invokes recovery at one `time.Now().UTC()` immediately after `statefs.Open`, before listening or service construction; it retains the repository/summary, logs only three bounded counts, and maps recovery failures to safe categories.
 - **Verification:** `gofmt` on the changed Go files; focused `go test ./internal/jobrecovery ./internal/jobrecord ./internal/server`; focused and full race tests; `go test ./...`; `go vet ./...`; and `git diff --check`. No scheduler, idempotency, HTTP/SSE, or cancellation mutation is included.
 - **Worker boundary:** A startup-recovery worker owns bounded enumeration, orchestration, summary, and runtime startup integration; it does not own queue limits, idempotency, remote reads, HTTP presentation, or execution resumption.
-- **Next:** 3.3.3 — persist scoped idempotency results.
+- **Next:** 3.3.3 — persist scoped idempotency results (now complete; see below).
 
-#### 3.3.3 Persist scoped idempotency results
+#### 3.3.3 Persist scoped idempotency results — **Complete**
 
-- **Scope:** Persist idempotency-key results under the actor/action/request-digest scope required by the API contract. Define the safe replay result and the fail-closed response for a key reused with a different scope or request digest.
+- **Scope:** Add a generic durable file repository under the fixed `idempotency` statefs directory. Scope records by exact normalized actor/action/key; keep request digest as the conflict discriminator. Support atomic create-or-replay with an explicit trusted UTC observation time, direct digest-checked lookup, expiry-aware replacement, bounded capacity reclamation, and narrow pending-to-terminal CAS completion. Do not integrate validation, inventory, credentials, plans, routes, scheduling, HTTP/SSE, or audit.
 - **Dependencies:** 3.3.1; Phase 2 substep 2.4 actor projection and substep 2.6 idempotency/request-digest contracts.
-- **Definition of done:** Repeated equivalent requests return the same durable result scope, while another actor, action, or digest cannot reuse it. Stored keys, digests, and results are bounded and non-secret.
-- **Focused verification:** Exercise same-scope replay before and after restart, each scope dimension changing independently, conflicting digest reuse, expiry/size bounds already required by the API contract, and secret sentinel scans.
-- **Worker boundary:** An idempotency worker owns the keyed result index and lookup semantics; it does not own general job transitions, route authorization, or credential handling.
+- **Definition of done:** Repeated equivalent requests return one durable record with an explicit replay result, different digests conflict without rewriting unexpired state, other scopes remain independent, terminal results are typed and immutable, and bounded state is fail-closed and non-secret.
+- **Evidence:** `internal/idempotencyrecord` implements domain-separated length-safe scope hashing, deterministic hash filenames/body IDs, strict `state.IdempotencyRecord` codecs, explicit caller-time validation for new/replacement candidates (`candidate.CreatedAt == at`), context gating, no-replace/CAS writes, restart-stable SHA-256 ETags, inclusive expiry semantics, 10,000-record/32 MiB coherent scan limits, ETag-conditional expiry reclamation under a capacity lock, and safe unavailable-versus-corrupt error mapping. `statefs` creates and validates the fixed `idempotency` directory on normal open and provides descriptor-relative `RemoveIfMatch` with directory fsync. Tests cover scope separation, replay/restart, digest conflicts, independent scopes, pending completion/terminal immutability, direct terminal records, create/completion/expiry replacement CAS races, expiry boundary/replacement, nil-expiry retention, reclamation, cross-repository 9,999-record capacity races, corruption/unsafe entries, context cancellation, strict serialized bytes, and sentinel-safe errors.
+- **Verification:** `gofmt`, focused idempotency/statefs tests, focused and full race tests, `go test ./...`, `go vet ./...`, and `git diff --check` pass for this increment.
+- **Worker boundary:** An idempotency worker owns only the keyed result repository and lookup semantics; it does not own general job transitions, route authorization, credential handling, or any scheduler/HTTP/SSE/audit integration.
+- **Next:** 3.3.4 — bound execution independently of browser connections.
 
 #### 3.3.4 Bound execution independently of browser connections
 

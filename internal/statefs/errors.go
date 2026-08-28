@@ -97,6 +97,7 @@ const (
 	JobsDir            = "jobs"
 	ReportsDir         = "reports"
 	AuditDir           = "audit"
+	IdempotencyDir     = "idempotency"
 	LocksDir           = "locks"
 )
 
@@ -109,6 +110,7 @@ var controlledDirectories = [...]string{
 	JobsDir,
 	ReportsDir,
 	AuditDir,
+	IdempotencyDir,
 	LocksDir,
 }
 

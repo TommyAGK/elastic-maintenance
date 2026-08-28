@@ -46,9 +46,10 @@ type Document struct {
 type LockKind string
 
 const (
-	LockKindProcess LockKind = "process"
-	LockKindJob     LockKind = "job"
-	LockKindTarget  LockKind = "target"
+	LockKindProcess     LockKind = "process"
+	LockKindJob         LockKind = "job"
+	LockKindTarget      LockKind = "target"
+	LockKindIdempotency LockKind = "idempotency"
 )
 
 // LockMetadata is the bounded, non-secret diagnostic projection stored in a
@@ -428,7 +429,7 @@ func (metadata LockMetadata) validate() error {
 			return fmt.Errorf("%w: invalid lock metadata %s", ErrInvalidOptions, field)
 		}
 	}
-	if metadata.Kind != LockKindProcess && metadata.Kind != LockKindJob && metadata.Kind != LockKindTarget {
+	if metadata.Kind != LockKindProcess && metadata.Kind != LockKindJob && metadata.Kind != LockKindTarget && metadata.Kind != LockKindIdempotency {
 		return fmt.Errorf("%w: invalid lock metadata kind", ErrInvalidOptions)
 	}
 	if metadata.ID != "" {
@@ -808,11 +809,11 @@ func (store *Store) ListDocuments(directoryName string) ([]string, error) {
 		return nil, err
 	}
 	if _, err := directory.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("%w: reset document enumeration", ErrInvalidStateDir)
+		return nil, fmt.Errorf("%w: reset document enumeration", ErrFileUnavailable)
 	}
 	entries, err := directory.Readdirnames(maxListedDocuments + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("%w: enumerate document directory", ErrInvalidStateDir)
+		return nil, fmt.Errorf("%w: enumerate document directory", ErrFileUnavailable)
 	}
 	if len(entries) > maxListedDocuments {
 		return nil, ErrTooManyDocuments
@@ -894,11 +895,11 @@ func (store *Store) ReadDocuments(directoryName string, maxCount int, maxTotalBy
 		return nil, err
 	}
 	if _, err := directory.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("%w: reset document enumeration", ErrInvalidStateDir)
+		return nil, fmt.Errorf("%w: reset document enumeration", ErrFileUnavailable)
 	}
 	entries, err := directory.Readdirnames(maxCount + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("%w: enumerate document directory", ErrInvalidStateDir)
+		return nil, fmt.Errorf("%w: enumerate document directory", ErrFileUnavailable)
 	}
 	if len(entries) > maxCount {
 		return nil, ErrTooManyDocuments
@@ -1037,14 +1038,14 @@ func (store *Store) readLocked(relative string) ([]byte, error) {
 	defer file.Close()
 	metadata, err := inspectFile(file)
 	if err != nil {
-		return nil, fmt.Errorf("%w: inspect document: %v", ErrCorrupt, err)
+		return nil, fmt.Errorf("%w: inspect document", ErrFileUnavailable)
 	}
 	if err := validateDocumentMetadata(metadata, store.ownerUID); err != nil {
 		return nil, err
 	}
 	info, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("%w: stat document: %v", ErrCorrupt, err)
+		return nil, fmt.Errorf("%w: stat document", ErrFileUnavailable)
 	}
 	if info.Size() < 0 || info.Size() > store.maxBytes {
 		return nil, ErrDocumentTooLarge
@@ -1052,7 +1053,7 @@ func (store *Store) readLocked(relative string) ([]byte, error) {
 	limited := io.LimitReader(file, store.maxBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read document: %v", ErrCorrupt, err)
+		return nil, fmt.Errorf("%w: read document", ErrFileUnavailable)
 	}
 	if int64(len(data)) > store.maxBytes {
 		return nil, ErrDocumentTooLarge
@@ -1138,7 +1139,7 @@ func (store *Store) writeAtomicLocked(relative string, data []byte, replace bool
 		metadata, inspectErr := inspectFile(existing)
 		_ = existing.Close()
 		if inspectErr != nil {
-			return fmt.Errorf("%w: inspect destination: %v", ErrCorrupt, inspectErr)
+			return fmt.Errorf("%w: inspect destination", ErrFileUnavailable)
 		}
 		if validateErr := validateDocumentMetadata(metadata, store.ownerUID); validateErr != nil {
 			return validateErr
@@ -1153,18 +1154,18 @@ func (store *Store) writeAtomicLocked(relative string, data []byte, replace bool
 		if !replace && errors.Is(openErr, os.ErrExist) {
 			return ErrDestinationExists
 		}
-		return fmt.Errorf("%w: inspect destination: %v", ErrCorrupt, openErr)
+		return fmt.Errorf("%w: inspect destination", ErrFileUnavailable)
 	} else if !replace {
 		// No destination is the normal no-replace case.
 	}
 
 	tempName, err := uniqueTempName()
 	if err != nil {
-		return fmt.Errorf("%w: temporary name: %v", ErrInvalidStateDir, err)
+		return wrapOperationError(ErrWriteFailed, "temporary name", err)
 	}
 	temporary, err := createTempFile(directory, tempName)
 	if err != nil {
-		return wrapOperationError(ErrInvalidStateDir, "create temporary document", err)
+		return wrapOperationError(ErrWriteFailed, "create temporary document", err)
 	}
 	cleanupTemp := true
 	defer func() {
@@ -1181,7 +1182,7 @@ func (store *Store) writeAtomicLocked(relative string, data []byte, replace bool
 			cleanupErr = store.syncDirectory(directory)
 		}
 		if cleanupErr != nil {
-			cleanupErr = wrapOperationError(ErrCorrupt, "cleanup temporary document", cleanupErr)
+			cleanupErr = wrapOperationError(ErrWriteFailed, "cleanup temporary document", cleanupErr)
 			if result == nil {
 				result = cleanupErr
 			} else {
@@ -1191,27 +1192,27 @@ func (store *Store) writeAtomicLocked(relative string, data []byte, replace bool
 	}()
 	if metadata, inspectErr := inspectFile(temporary); inspectErr != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("%w: inspect temporary document: %v", ErrCorrupt, inspectErr)
+		return fmt.Errorf("%w: inspect temporary document", ErrFileUnavailable)
 	} else if validateErr := validateTemporaryMetadata(metadata, store.ownerUID); validateErr != nil {
 		_ = temporary.Close()
 		return validateErr
 	}
 	if err := writeComplete(temporary, data, store.hooks.Write); err != nil {
 		_ = temporary.Close()
-		return wrapOperationError(ErrCorrupt, "write temporary document", err)
+		return wrapOperationError(ErrWriteFailed, "write temporary document", err)
 	}
 	if err := store.syncFile(temporary); err != nil {
 		_ = temporary.Close()
-		return wrapOperationError(ErrCorrupt, "fsync temporary document", err)
+		return wrapOperationError(ErrWriteFailed, "fsync temporary document", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return wrapOperationError(ErrCorrupt, "close temporary document", mapSpaceError(err))
+		return wrapOperationError(ErrWriteFailed, "close temporary document", mapSpaceError(err))
 	}
 	if err := store.rename(directory, tempName, name, replace); err != nil {
 		if errors.Is(err, ErrDestinationExists) || errors.Is(err, os.ErrExist) || isAlreadyExists(err) {
 			return ErrDestinationExists
 		}
-		return wrapOperationError(ErrCorrupt, "rename temporary document", err)
+		return wrapOperationError(ErrWriteFailed, "rename temporary document", err)
 	}
 	cleanupTemp = false
 	if err := store.syncDirectory(directory); err != nil {
@@ -1386,6 +1387,13 @@ func (store *Store) AcquireJobLock(id string) (*Lock, error) {
 // several locks must use AcquireLocks.
 func (store *Store) AcquireTargetLock(id string) (*Lock, error) {
 	return store.acquireNamedLock(LockKindTarget, id)
+}
+
+// AcquireIdempotencyLock obtains a nonblocking lock for a canonical
+// idempotency-repository coordination ID. It is separate from job locks so a
+// valid job identity cannot accidentally block idempotency capacity admission.
+func (store *Store) AcquireIdempotencyLock(id string) (*Lock, error) {
+	return store.acquireNamedLock(LockKindIdempotency, id)
 }
 
 func (store *Store) acquireNamedLock(kind LockKind, id string) (*Lock, error) {
@@ -1565,6 +1573,30 @@ func (store *Store) Remove(relative string) error {
 	if err := store.checkOpenLocked(); err != nil {
 		return err
 	}
+	return store.removeLocked(relative, nil)
+}
+
+// RemoveIfMatch removes a document only when its exact content ETag matches
+// expectedETag. Store.mu remains held across path validation, metadata/content
+// validation, ETag comparison, descriptor-relative removal, and directory
+// fsync. A changed or missing document is never removed and maps to the safe
+// ErrETagMismatch or ErrNotFound result.
+func (store *Store) RemoveIfMatch(relative, expectedETag string) error {
+	if store == nil {
+		return ErrClosed
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.checkOpenLocked(); err != nil {
+		return err
+	}
+	return store.removeLocked(relative, &expectedETag)
+}
+
+// removeLocked is the non-locking implementation shared by Remove and
+// RemoveIfMatch. The caller must hold Store.mu. A nil expectedETag selects
+// unconditional removal; callers that need CAS always supply a value.
+func (store *Store) removeLocked(relative string, expectedETag *string) error {
 	directory, name, err := store.documentLocation(relative)
 	if err != nil {
 		return err
@@ -1572,20 +1604,12 @@ func (store *Store) Remove(relative string) error {
 	if err := store.validateControlledDirectory(directory); err != nil {
 		return err
 	}
-	file, err := openDocumentFile(directory, name)
+	current, err := store.readLocked(relative)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
-		}
 		return err
 	}
-	metadata, inspectErr := inspectFile(file)
-	_ = file.Close()
-	if inspectErr != nil {
-		return inspectErr
-	}
-	if err := validateDocumentMetadata(metadata, store.ownerUID); err != nil {
-		return err
+	if expectedETag != nil && !sameETag(current, *expectedETag) {
+		return ErrETagMismatch
 	}
 	if store.hooks.Remove != nil {
 		err = store.hooks.Remove(directory, name)
@@ -1593,12 +1617,25 @@ func (store *Store) Remove(relative string) error {
 		err = removeAt(directory, name)
 	}
 	if err != nil {
-		return mapSpaceError(err)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return ErrNotFound
+		case isSpaceError(err):
+			return mapSpaceError(err)
+		default:
+			return fmt.Errorf("%w: remove document", ErrFileUnavailable)
+		}
 	}
 	if err := store.syncDirectory(directory); err != nil {
 		return wrapOperationError(ErrDurabilityUnknown, "fsync document directory", err)
 	}
 	return nil
+}
+
+func sameETag(data []byte, expected string) bool {
+	actual := sha256.Sum256(data)
+	encoded := hex.EncodeToString(actual[:])
+	return len(encoded) == len(expected) && subtle.ConstantTimeCompare([]byte(encoded), []byte(expected)) == 1
 }
 
 // sha256Sum is kept local to avoid exposing a digest API from this filesystem
