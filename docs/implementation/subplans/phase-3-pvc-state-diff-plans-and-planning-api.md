@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, and Phase 3.3.3 complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, and durable scoped idempotency persistence are implemented. Scheduling, remaining durable jobs/audit, planning, and API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, and Phase 3.3.4a complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, and the standalone durable scheduler core are implemented. Scheduler runtime integration, remaining durable jobs/audit, planning, and API work remain.
 
 ## Objective
 
@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.3 is complete; 3.3.4 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.4a is complete; 3.3.4b through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -78,20 +78,31 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Evidence:** `internal/idempotencyrecord` implements domain-separated length-safe scope hashing, deterministic hash filenames/body IDs, strict `state.IdempotencyRecord` codecs, explicit caller-time validation for new/replacement candidates (`candidate.CreatedAt == at`), context gating, no-replace/CAS writes, restart-stable SHA-256 ETags, inclusive expiry semantics, 10,000-record/32 MiB coherent scan limits, ETag-conditional expiry reclamation under a capacity lock, and safe unavailable-versus-corrupt error mapping. `statefs` creates and validates the fixed `idempotency` directory on normal open and provides descriptor-relative `RemoveIfMatch` with directory fsync. Tests cover scope separation, replay/restart, digest conflicts, independent scopes, pending completion/terminal immutability, direct terminal records, create/completion/expiry replacement CAS races, expiry boundary/replacement, nil-expiry retention, reclamation, cross-repository 9,999-record capacity races, corruption/unsafe entries, context cancellation, strict serialized bytes, and sentinel-safe errors.
 - **Verification:** `gofmt`, focused idempotency/statefs tests, focused and full race tests, `go test ./...`, `go vet ./...`, and `git diff --check` pass for this increment.
 - **Worker boundary:** An idempotency worker owns only the keyed result repository and lookup semantics; it does not own general job transitions, route authorization, credential handling, or any scheduler/HTTP/SSE/audit integration.
-- **Next:** 3.3.4 — bound execution independently of browser connections.
+- **Next:** 3.3.4b — integrate scheduler runtime lifecycle.
 
-#### 3.3.4 Bound execution independently of browser connections
+#### 3.3.4a Implement the durable scheduler core
 
-- **Scope:** Add the durable-job scheduler/executor limits for configured concurrency and queue size, and make job execution continue or terminate according to the explicit per-type recovery classification from 3.3.2a after startup recovery in 3.3.2b rather than the lifetime of a browser connection.
-- **Dependencies:** 3.3.1 and 3.3.2b; `internal/jobs.Queue` and `CancellationPolicy` contracts plus Phase 1 substeps 1.7–1.8 and Phase 2 substep 2.10 job-execution interfaces.
-- **Definition of done:** Queue admission, concurrency, overload, shutdown, and disconnected-client behavior are bounded and observable through durable job state. No job requires an attached browser or open HTTP response to finish safely.
-- **Focused verification:** Fill the queue, exceed concurrency, disconnect polling/SSE clients, restart during queued/running work, and shut down with pending work. Verify bounded resource use, accurate final states, and no duplicate execution caused by disconnects.
-- **Worker boundary:** A scheduler worker owns queue admission, worker lifetimes, and concurrency limits; it does not own persisted record formats, idempotency lookup, event serialization, or planning logic.
+- **Scope:** Add a generic scheduler over `jobrecord.Repository` with explicit queued-job submissions and in-memory executor closures, bounded waiting capacity and worker concurrency, CAS lifecycle transitions, scheduler-owned execution contexts, safe fixed failure results, and deterministic cooperative shutdown. Current durable job records intentionally do not persist complete validation or target-inventory inputs, so no existing route/service is switched in this increment and no work is resumable after restart.
+- **Dependencies:** 3.3.1 and 3.3.2b; existing `jobs` status/transition contracts.
+- **Definition of done:** Admission reserves a bounded slot before durable create; accepted work continues after its submitting context/browser disconnects; only configured workers execute; queued/running/succeeded/failed/canceled records are durably accurate; overload and closed schedulers reject safely; executor panics/invalid results cannot leak arbitrary diagnostics; persistence failure closes admission and leaves restart recovery authoritative.
+- **Focused verification:** Fill waiting and running capacity, exceed limits, cancel the submitting context after acceptance, inject success/failure/panic/invalid executor results, race submissions and CAS changes across repositories, and shut down with running/queued work. Verify exact max concurrency, one execution per accepted ID, bounded safe codes, accurate durable states, race safety, and sentinel-free errors.
+- **Worker boundary:** A scheduler-core worker owns admission, worker lifetimes, execution context, durable lifecycle transitions, health, and cooperative shutdown only; it does not wire server startup, existing validation/inventory services, idempotency, cancellation APIs, SSE, or planning logic.
+- **Evidence:** `internal/jobscheduler` implements the standalone core over a minimal `jobrecord.Repository` interface. It validates explicit queued `state.Job` submissions and every returned record/ETag, reserves `QueueCapacity+Workers` before durable create, applies a bounded scheduler-owned persistence context to every lifecycle repository call, keeps accepted work independent of submitter contexts, limits execution to configured workers, CAS-claims and terminalizes jobs with UTC timestamps, preserves metadata and type-valid plan/report links, maps invalid results/panics to `executor_result_invalid`/`executor_panic`, linearizes shutdown cancellation under admission, closes admission on unexpected or ambiguous persistence failures, and cancels accepted queued/running work cooperatively without `jobrecovery.Interrupt`.
+- **Verification:** `internal/jobscheduler/scheduler_test.go` covers real `statefs`/`jobrecord` lifecycle, exact capacity and concurrency, submit-context disconnect, pre-canceled admission, success/failure/panic/invalid results, shutdown cancellation/idempotency/barrier races, non-cooperative executor retry, stale start/finish ownership, malformed ETags, persistence timeouts, post-rename unknown Create outcomes, persistence-failure health sentinels, metadata/link preservation, and concurrent submissions. `go test ./internal/jobscheduler`, `go test -race ./internal/jobscheduler`, `go test ./...`, `go vet ./...`, and `git diff --check` pass. Verification timestamp: 2026-08-31T12:39:45Z. No runtime/service/route adapter, restart resumption, idempotency, cancellation API, SSE, planning, or audit was added.
+- **Next:** 3.3.4b — integrate scheduler runtime lifecycle.
+
+#### 3.3.4b Integrate scheduler runtime lifecycle
+
+- **Scope:** Construct the scheduler only after 3.3.2b startup recovery, retain it in `HTTPRuntime`, and shut it down before closing the durable state store. Keep all existing request services on their current executors until their durable input/result adapters exist; do not imply that process-local validation or live-inventory jobs have become durable.
+- **Dependencies:** 3.3.4a and the Phase 3.2/3.3.2b runtime lifecycle.
+- **Definition of done:** No scheduler starts before recovery; listener/service construction failures stop it and release state; normal and timeout shutdown ordering is deterministic; readiness fails after fatal scheduler persistence failure; zero registered route adapters cannot execute work.
+- **Focused verification:** Constructor ordering, recovery failure, listener failure, normal shutdown, scheduler timeout/fatal health, state-lock cleanup, and no-work startup tests pass without changing existing endpoint behavior.
+- **Worker boundary:** A runtime-lifecycle worker owns server construction/readiness/shutdown integration only; it does not adapt route submissions, alter persisted formats, or implement job read/cancellation/SSE APIs.
 
 #### 3.3.5 Expose authenticated job list and polling projections
 
 - **Scope:** Project durable job state into the existing authenticated `Get` and paginated `List` read projections. Keep projections safe and make polling the authoritative fallback; do not add browser-dependent execution semantics.
-- **Dependencies:** 3.3.1 and 3.3.4; `internal/jobs.Queue.Get`/`List` and `ListOptions` contracts, Phase 2 substeps 2.1–2.4 authentication/RBAC, and Phase 1 substep 1.8 API response/pagination conventions.
+- **Dependencies:** 3.3.1 and 3.3.4b; `internal/jobs.Queue.Get`/`List` and `ListOptions` contracts, Phase 2 substeps 2.1–2.4 authentication/RBAC, and Phase 1 substep 1.8 API response/pagination conventions.
 - **Definition of done:** Authorized viewers can retrieve one job or bounded filtered pages of jobs, unauthorized callers are denied, all existing statuses are representable, and reads do not alter execution or persisted state.
 - **Focused verification:** Test role authorization, malformed/unknown job IDs, each status including `canceled` and `interrupted`, type/status filters, first/middle/last/empty pages, invalid page bounds/tokens, polling after restart, and response sentinel scans.
 - **Worker boundary:** A job-read worker owns `Get`/`List` handlers, serializers, and pagination only; it does not own queue scheduling, cancellation transitions, SSE, or planning.
@@ -99,7 +110,7 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 #### 3.3.6 Expose authenticated SSE and existing cancellation projection
 
 - **Scope:** Project durable job changes into the bounded authenticated SSE stream and wire the existing `Queue.RequestCancellation`/`CancellationPolicy` contract where the API exposes cancellation. Use only existing status transitions; do not add a new cancellation mode or make execution browser-dependent.
-- **Dependencies:** 3.3.1, 3.3.4, and 3.3.5; Phase 2 substeps 2.1–2.4 authentication/RBAC and the existing job cancellation contract.
+- **Dependencies:** 3.3.1, 3.3.4b, and 3.3.5; Phase 2 substeps 2.1–2.4 authentication/RBAC and the existing job cancellation contract.
 - **Definition of done:** Authorized cancellation requests follow the existing policy and transitions, unsupported/terminal requests fail safely, SSE events are bounded and non-secret, and client disconnect does not cancel or duplicate the job.
 - **Focused verification:** Test authorized/denied cancellation, queued/running/terminal jobs, unsupported cancellation, event ordering/bounds, stream limits, client disconnect, restart, and polling after SSE loss. Sentinel-scan job responses and events.
 - **Worker boundary:** A job-event worker owns cancellation/API projection adapters and SSE plumbing only; it does not modify scheduler limits, persisted record formats, state-transition policy, or plan execution.

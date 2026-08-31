@@ -515,14 +515,15 @@ Gate: authenticated roles and Secret ownership controls pass; break-glass admini
 
 ### Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, 3.2, 3.3.1, 3.3.2a, 3.3.2b, and 3.3.3 complete; Phase 3 not passed.**
+**Status: Phase 3.1, 3.2, 3.3.1, 3.3.2a, 3.3.2b, 3.3.3, and 3.3.4a complete; Phase 3 not passed.**
 
 Detailed sub-plan: `docs/implementation/subplans/phase-3-pvc-state-diff-plans-and-planning-api.md`
 
 - Implement file state, jobs, audit, inventory/journals, ownership, DAG/diff, saved plans, planning API, and plan-review UI.
 - **3.3.2b complete:** `internal/jobrecord.FileRepository.Recover` performs one bounded coherent jobs snapshot, validates/classifies all records before CAS interruption, preserves terminal bytes, and returns identifier-free counts; `internal/server` runs it once at `time.Now().UTC()` after `statefs.Open` and before listening, with safe failure cleanup. Focused recovery and restart tests cover matrix/statuses, malformed and concurrent state, reruns, bounds, and listener/lock behavior.
 - **3.3.3 complete:** `internal/idempotencyrecord.FileRepository` persists strict scoped idempotency records under the fixed `idempotency` statefs directory. Its actor/action/key hash excludes request digest, validates deterministic filename/body IDs, accepts an explicit canonical UTC `at` and requires it to equal a new or replacement candidate's `CreatedAt`, atomically creates or replays with explicit `Record.Replay`, returns digest conflicts, safely reclaims only ETag-matching expired records at capacity, supports caller-time expiry/replacement and pending-to-terminal typed-result CAS, preserves restart-stable SHA-256 ETags, and bounds coherent validation scans to 10,000 records/32 MiB. Focused tests cover scope separation, restart/replay, conflicts, independent scopes, terminal completion, direct terminal results, multi-repository CAS races, expiry, nil-expiry retention, capacity reclamation, malformed/unsafe state, context cancellation, strict bytes, and sentinel-safe errors. No existing service/route, scheduler, HTTP/SSE, or audit integration was added.
-- **Next:** 3.3.4 — bound execution independently of browser connections. Scheduler/executor, HTTP/SSE, cancellation mutation, audit, diffing, and saved plans remain future work.
+- **3.3.4a complete:** `internal/jobscheduler` implements standalone durable admission and execution over the minimal `jobrecord.Repository` transition surface. It reserves `QueueCapacity+Workers` slots before durable create, applies bounded scheduler-owned persistence contexts, validates returned records and ETags, survives submitting-context disconnects after acceptance, bounds worker concurrency, CAS-claims queued records, preserves metadata and type-valid result links, maps invalid results/panics to fixed safe codes, linearizes shutdown cancellation under admission, closes safely on persistence or ownership ambiguity, and cooperatively cancels accepted queued/running work on shutdown. No runtime/service/route adapter, restart resumption, idempotency, cancellation API, SSE, planning, or audit was added. Verification timestamp: 2026-08-31T12:39:45Z.
+- **Next:** 3.3.4b — integrate scheduler runtime lifecycle. HTTP/SSE, cancellation mutation, audit, diffing, and saved plans remain future work.
 
 Gate: deterministic non-secret plans are source/target scoped and cannot authorize prune without inventory plus marker.
 
