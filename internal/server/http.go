@@ -27,6 +27,7 @@ import (
 	"github.com/TommyAGK/elastic-maintenance/internal/credentials"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobrecord"
 	"github.com/TommyAGK/elastic-maintenance/internal/jobs"
+	"github.com/TommyAGK/elastic-maintenance/internal/jobscheduler"
 	"github.com/TommyAGK/elastic-maintenance/internal/kibana"
 	"github.com/TommyAGK/elastic-maintenance/internal/kubesecret"
 	"github.com/TommyAGK/elastic-maintenance/internal/liveinventory"
@@ -39,13 +40,19 @@ import (
 )
 
 const (
-	maxRequestBodyBytes       = 1 << 20
-	maxHeaderBytes            = 32 << 10
-	readHeaderTimeout         = 5 * time.Second
-	readTimeout               = 15 * time.Second
-	writeTimeout              = 30 * time.Second
-	idleTimeout               = 60 * time.Second
-	validationShutdownTimeout = 10 * time.Second
+	maxRequestBodyBytes   = 1 << 20
+	maxHeaderBytes        = 32 << 10
+	readHeaderTimeout     = 5 * time.Second
+	readTimeout           = 15 * time.Second
+	writeTimeout          = 30 * time.Second
+	idleTimeout           = 60 * time.Second
+	runtimeCleanupTimeout = 10 * time.Second
+
+	// These are fixed runtime defaults for the scheduler lifecycle integration.
+	// PersistenceTimeout intentionally remains zero so jobscheduler.New applies
+	// its documented core default.
+	runtimeSchedulerWorkers       = 1
+	runtimeSchedulerQueueCapacity = 32
 )
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -101,20 +108,83 @@ type HandlerOptions struct {
 	TrustedProxies       []string
 }
 
+// schedulerLifecycle is the only scheduler surface owned by the HTTP
+// runtime. Runtime integration deliberately does not submit or resume jobs.
+type schedulerLifecycle interface {
+	Health() error
+	Shutdown(context.Context) error
+}
+
+type shutdownLifecycle interface {
+	Shutdown(context.Context) error
+}
+
+type httpServerLifecycle interface {
+	Serve(net.Listener) error
+	Shutdown(context.Context) error
+	Close() error
+}
+
+type schedulerFactory func(*jobrecord.FileRepository) (schedulerLifecycle, error)
+
+type runtimeConstructorHooks struct {
+	// stateStoreOpened is a test-only observation seam. Production construction
+	// passes no hooks; retaining a failed lifecycle therefore cannot be bypassed.
+	stateStoreOpened func(*statefs.Store)
+	cleanupTimeout   time.Duration
+}
+
+var _ schedulerLifecycle = (*jobscheduler.Scheduler)(nil)
+
+var (
+	// These fixed errors are safe to return at lifecycle boundaries. In
+	// particular, scheduler implementation/storage diagnostics never cross the
+	// startup or shutdown API boundary.
+	errSchedulerStartup  = errors.New("job scheduler startup failed")
+	errSchedulerShutdown = errors.New("job scheduler shutdown failed")
+	errServeShutdown     = errors.New("http serve shutdown failed")
+
+	// A constructor cannot return the runtime when cleanup cannot prove that a
+	// worker stopped. Keep the store reachable for process lifetime so its
+	// descriptors and process lock cannot be released by garbage collection.
+	retainedStateStores = struct {
+		sync.Mutex
+		stores map[*statefs.Store]struct{}
+	}{stores: make(map[*statefs.Store]struct{})}
+)
+
+func retainStateStore(store *statefs.Store) {
+	if store == nil {
+		return
+	}
+	retainedStateStores.Lock()
+	retainedStateStores.stores[store] = struct{}{}
+	retainedStateStores.Unlock()
+}
+
 type HTTPRuntime struct {
-	listener      net.Listener
-	server        *http.Server
-	validation    *validation.Service
-	targetClients *kibana.TargetClientFactory
-	liveInventory *liveinventory.Service
-	stateStore    *statefs.Store
-	jobRepository *jobrecord.FileRepository
-	recovery      jobrecord.RecoverySummary
-	build         BuildInfo
-	ready         atomic.Bool
-	shuttingDown  atomic.Bool
-	retainState   atomic.Bool
-	lifecycleMu   sync.Mutex
+	listener               net.Listener
+	server                 httpServerLifecycle
+	validation             shutdownLifecycle
+	targetClients          *kibana.TargetClientFactory
+	liveInventory          shutdownLifecycle
+	stateStore             *statefs.Store
+	jobRepository          *jobrecord.FileRepository
+	scheduler              schedulerLifecycle
+	recovery               jobrecord.RecoverySummary
+	build                  BuildInfo
+	ready                  atomic.Bool
+	shuttingDown           atomic.Bool
+	retainState            atomic.Bool
+	lifecycleMu            sync.Mutex
+	shutdownOnce           sync.Once
+	shutdownDone           chan struct{}
+	shutdownErr            error
+	serveStarted           bool
+	serveActive            bool
+	serveReturned          atomic.Bool
+	serveShutdownInitiated bool
+	serveExitDone          chan struct{}
 }
 
 func NewHTTPRuntime(cfg *config.ServerConfig, build BuildInfo) (Runtime, error) {
@@ -128,6 +198,42 @@ func newHTTPRuntime(
 	logger *slog.Logger,
 	listen func(string, string) (net.Listener, error),
 ) (Runtime, error) {
+	return newHTTPRuntimeWithSchedulerFactory(cfg, build, logger, listen, defaultSchedulerFactory)
+}
+
+// defaultSchedulerFactory applies the fixed runtime scheduler defaults. The
+// zero PersistenceTimeout deliberately delegates to jobscheduler.New's core
+// default rather than adding a server configuration field in this increment.
+func defaultSchedulerFactory(repository *jobrecord.FileRepository) (schedulerLifecycle, error) {
+	return jobscheduler.New(jobscheduler.Options{
+		Repository:    repository,
+		Workers:       runtimeSchedulerWorkers,
+		QueueCapacity: runtimeSchedulerQueueCapacity,
+	})
+}
+
+// newHTTPRuntimeWithSchedulerFactory is the constructor dependency seam used
+// by lifecycle tests. The repository passed to the factory has completed
+// bounded startup recovery; no scheduler submission or enumeration occurs
+// here.
+func newHTTPRuntimeWithSchedulerFactory(
+	cfg *config.ServerConfig,
+	build BuildInfo,
+	logger *slog.Logger,
+	listen func(string, string) (net.Listener, error),
+	makeScheduler schedulerFactory,
+) (Runtime, error) {
+	return newHTTPRuntimeWithSchedulerFactoryAndHooks(cfg, build, logger, listen, makeScheduler, nil)
+}
+
+func newHTTPRuntimeWithSchedulerFactoryAndHooks(
+	cfg *config.ServerConfig,
+	build BuildInfo,
+	logger *slog.Logger,
+	listen func(string, string) (net.Listener, error),
+	makeScheduler schedulerFactory,
+	hooks *runtimeConstructorHooks,
+) (Runtime, error) {
 	if cfg == nil {
 		return nil, errors.New("server config is nil")
 	}
@@ -139,6 +245,9 @@ func newHTTPRuntime(
 	}
 	if listen == nil {
 		return nil, errors.New("server listen function is nil")
+	}
+	if makeScheduler == nil {
+		return nil, errSchedulerStartup
 	}
 
 	ownerUID := os.Geteuid()
@@ -152,6 +261,9 @@ func newHTTPRuntime(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open state directory: %w", safeStateOpenError(err))
+	}
+	if hooks != nil && hooks.stateStoreOpened != nil {
+		hooks.stateStoreOpened(stateStore)
 	}
 
 	jobRepository, err := jobrecord.New(stateStore)
@@ -171,18 +283,29 @@ func newHTTPRuntime(
 		slog.Int("interrupted", recoverySummary.Interrupted),
 	)
 
-	listener, err := listen("tcp", cfg.Listen)
-	if err != nil {
-		if listener != nil {
-			_ = listener.Close()
+	// Recovery is complete before scheduler creation. The scheduler core starts
+	// workers but does not enumerate or submit any durable records itself.
+	scheduler, schedulerErr := makeScheduler(jobRepository)
+	if schedulerErr != nil || scheduler == nil {
+		// A factory may return a live scheduler alongside an error. Its lifecycle
+		// must still be proven stopped before releasing the process lock.
+		var schedulerShutdownErr error
+		if scheduler != nil {
+			schedulerShutdownErr = shutdownWithTimeout(scheduler.Shutdown, constructorCleanupTimeout(hooks))
 		}
-		_ = stateStore.Close()
-		return nil, fmt.Errorf("listen on configured address: %w", err)
+		if schedulerShutdownErr == nil {
+			_ = stateStore.Close()
+		} else {
+			retainStateStore(stateStore)
+		}
+		return nil, errSchedulerStartup
 	}
 
-	// Keep all constructor-owned resources under one failure cleanup path. In
-	// particular, stateStore must release its process lock before returning any
-	// later authentication/service construction error.
+	// Keep every resource acquired after scheduler creation under one cleanup
+	// path. Scheduler shutdown is attempted with a bounded context before the
+	// listener or state store is closed, including listener and later-service
+	// construction failures.
+	var listener net.Listener
 	var validationService *validation.Service
 	var liveInventory *liveinventory.Service
 	cleanup := true
@@ -190,15 +313,35 @@ func newHTTPRuntime(
 		if !cleanup {
 			return
 		}
+		// Each worker receives a fresh bounded context. A timeout or cancellation
+		// from one lifecycle cannot poison the next one, and state is retained
+		// whenever any worker fails to prove that it stopped.
+		cleanupTimeout := constructorCleanupTimeout(hooks)
+		liveInventoryErr := error(nil)
 		if liveInventory != nil {
-			_ = liveInventory.Shutdown(context.Background())
+			liveInventoryErr = shutdownWithTimeout(liveInventory.Shutdown, cleanupTimeout)
 		}
+		validationErr := error(nil)
 		if validationService != nil {
-			_ = validationService.Shutdown(context.Background())
+			validationErr = shutdownWithTimeout(validationService.Shutdown, cleanupTimeout)
 		}
-		_ = listener.Close()
-		_ = stateStore.Close()
+		schedulerErr := shutdownWithTimeout(scheduler.Shutdown, cleanupTimeout)
+		listenerErr := error(nil)
+		if listener != nil {
+			// The listener is always closed, even when a worker did not stop.
+			listenerErr = listener.Close()
+		}
+		if schedulerErr == nil && liveInventoryErr == nil && validationErr == nil && listenerErr == nil {
+			_ = stateStore.Close()
+		} else {
+			retainStateStore(stateStore)
+		}
 	}()
+
+	listener, err = listen("tcp", cfg.Listen)
+	if err != nil {
+		return nil, fmt.Errorf("listen on configured address: %w", err)
+	}
 
 	securityAudit := audit.LogRecorder{Logger: logger}
 	var browserAuth BrowserAuthenticator
@@ -291,7 +434,7 @@ func newHTTPRuntime(
 	if err != nil {
 		return nil, fmt.Errorf("create live inventory service: %w", err)
 	}
-	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, stateStore: stateStore, jobRepository: jobRepository, recovery: recoverySummary, build: normalizedBuild}
+	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, stateStore: stateStore, jobRepository: jobRepository, scheduler: scheduler, recovery: recoverySummary, build: normalizedBuild, shutdownDone: make(chan struct{})}
 	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.isReady, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)
@@ -309,6 +452,22 @@ func newHTTPRuntime(
 	}
 	cleanup = false
 	return runtime, nil
+}
+
+func constructorCleanupTimeout(hooks *runtimeConstructorHooks) time.Duration {
+	if hooks != nil && hooks.cleanupTimeout > 0 {
+		return hooks.cleanupTimeout
+	}
+	return runtimeCleanupTimeout
+}
+
+// shutdownWithTimeout gives each lifecycle its own bounded context. Runtime
+// lifecycle implementations are required to honor context cancellation; calls
+// remain synchronous so cleanup never abandons an untracked goroutine.
+func shutdownWithTimeout(shutdown func(context.Context) error, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return shutdown(ctx)
 }
 
 // safeJobRecoveryError retains only bounded recovery categories. In
@@ -370,7 +529,10 @@ func lockInstanceID(build BuildInfo) string {
 }
 
 func (runtime *HTTPRuntime) isReady() bool {
-	if runtime == nil || !runtime.ready.Load() || runtime.stateStore == nil {
+	if runtime == nil || !runtime.ready.Load() || runtime.stateStore == nil || runtime.scheduler == nil {
+		return false
+	}
+	if runtime.scheduler.Health() != nil {
 		return false
 	}
 	return runtime.stateStore.Check() == nil
@@ -383,61 +545,262 @@ func (runtime *HTTPRuntime) closeState() error {
 	return runtime.stateStore.Close()
 }
 
+func (runtime *HTTPRuntime) retainStateForLifecycle() {
+	if runtime == nil {
+		return
+	}
+	runtime.retainState.Store(true)
+	retainStateStore(runtime.stateStore)
+}
+
 func (runtime *HTTPRuntime) Serve() error {
 	runtime.lifecycleMu.Lock()
-	if runtime.shuttingDown.Load() {
+	if runtime.shuttingDown.Load() || runtime.serveStarted {
 		runtime.lifecycleMu.Unlock()
 		return nil
 	}
+	runtime.serveStarted = true
+	runtime.serveActive = true
+	runtime.serveExitDone = make(chan struct{})
 	runtime.ready.Store(true)
 	runtime.lifecycleMu.Unlock()
+
 	err := runtime.server.Serve(runtime.listener)
+	runtime.serveReturned.Store(true)
+
 	runtime.lifecycleMu.Lock()
 	runtime.ready.Store(false)
+	// Classify and publish the Serve result as one critical-section operation.
+	// normalShutdown waits for this publication before it can close state.
+	expected := errors.Is(err, http.ErrServerClosed) && runtime.serveShutdownInitiated
+	if !expected {
+		runtime.retainStateForLifecycle()
+	}
+	runtime.serveActive = false
+	close(runtime.serveExitDone)
 	runtime.lifecycleMu.Unlock()
-	if errors.Is(err, http.ErrServerClosed) && runtime.shuttingDown.Load() {
+
+	if expected {
 		return nil
 	}
-	// Serve returned without the coordinated Shutdown path. Force active HTTP
-	// handlers closed, stop workers, and release state only after they stop.
-	_ = runtime.server.Close()
-	_ = runtime.listener.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), validationShutdownTimeout)
-	defer cancel()
-	_ = runtime.liveInventory.Shutdown(ctx)
-	_ = runtime.validation.Shutdown(ctx)
-	// Server.Close cannot prove every force-closed handler returned. Retain the
-	// state descriptors and process lock until process exit.
-	runtime.retainState.Store(true)
+	// Signal exit classification before entering the once-only coordinator. If
+	// normal Shutdown won the race, it can now observe retainState and will not
+	// close the state store; Serve then waits on that same coordinator.
+	_ = runtime.shutdown(context.Background(), true)
 	return err
 }
 
 func (runtime *HTTPRuntime) Shutdown(ctx context.Context) error {
+	return runtime.shutdown(ctx, false)
+}
+
+// shutdown coordinates both normal Shutdown calls and an unexpected Serve
+// exit. sync.Once prevents repeated calls (including the Serve/Shutdown race)
+// from invoking any lifecycle more than once. The completed result is cached;
+// a failed or timed-out worker lifecycle is never retried by a later Shutdown.
+// ctx bounds only this caller's wait; the coordinator uses independent worker
+// bounds so one caller timeout cannot cancel another lifecycle.
+func (runtime *HTTPRuntime) shutdown(ctx context.Context, unexpected bool) error {
+	if runtime == nil {
+		return errSchedulerShutdown
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	runtime.lifecycleMu.Lock()
 	runtime.shuttingDown.Store(true)
 	runtime.ready.Store(false)
-	runtime.lifecycleMu.Unlock()
-	serverErr := runtime.server.Shutdown(ctx)
-	if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
-		runtime.retainState.Store(true)
-		_ = runtime.server.Close()
+	if runtime.shutdownDone == nil {
+		runtime.shutdownDone = make(chan struct{})
 	}
-	listenerErr := runtime.listener.Close()
-	liveInventoryErr := runtime.liveInventory.Shutdown(ctx)
-	validationErr := runtime.validation.Shutdown(ctx)
-	// Never close state underneath a worker that failed to stop. Process exit
-	// will release descriptors and locks after the lifecycle error is returned.
+	done := runtime.shutdownDone
+	runtime.lifecycleMu.Unlock()
+
+	runtime.shutdownOnce.Do(func() {
+		go func() {
+			var err error
+			if unexpected {
+				err = runtime.unexpectedShutdown()
+			} else {
+				err = runtime.normalShutdown()
+			}
+			runtime.shutdownErr = err
+			close(done)
+		}()
+	})
+
+	// Prefer a completed coordinator over a canceled caller context. This
+	// makes repeated Shutdown deterministic once the cached result is ready.
+	select {
+	case <-done:
+		return runtime.shutdownErr
+	default:
+	}
+	select {
+	case <-done:
+		return runtime.shutdownErr
+	case <-ctx.Done():
+		// Prefer a completion that raced caller cancellation. Do not expose
+		// caller diagnostics or retry cleanup here.
+		select {
+		case <-done:
+			return runtime.shutdownErr
+		default:
+			// The coordinator may still be unwinding independently bounded
+			// lifecycles; its eventual result remains cached.
+			return errSchedulerShutdown
+		}
+	}
+}
+
+func (runtime *HTTPRuntime) normalShutdown() error {
+	serverErr := error(nil)
+	if runtime.server != nil {
+		runtime.lifecycleMu.Lock()
+		if !runtime.serveReturned.Load() {
+			runtime.serveShutdownInitiated = true
+		}
+		runtime.lifecycleMu.Unlock()
+		serverErr = shutdownWithTimeout(runtime.server.Shutdown, runtimeCleanupTimeout)
+		if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+			runtime.retainStateForLifecycle()
+			_ = runtime.server.Close()
+		}
+	}
+
+	// Each lifecycle operation gets its own bounded context. In particular, a
+	// timed-out service cannot leave the scheduler with an already-canceled
+	// context, and every failure below retains the state lock.
+	listenerErr := error(nil)
+	if runtime.listener != nil {
+		listenerErr = runtime.listener.Close()
+		if listenerErr != nil && !errors.Is(listenerErr, net.ErrClosed) {
+			runtime.retainStateForLifecycle()
+		}
+	}
+	liveInventoryErr := error(nil)
+	if runtime.liveInventory != nil {
+		liveInventoryErr = shutdownWithTimeout(runtime.liveInventory.Shutdown, runtimeCleanupTimeout)
+		if liveInventoryErr != nil {
+			runtime.retainStateForLifecycle()
+		}
+	}
+	validationErr := error(nil)
+	if runtime.validation != nil {
+		validationErr = shutdownWithTimeout(runtime.validation.Shutdown, runtimeCleanupTimeout)
+		if validationErr != nil {
+			runtime.retainStateForLifecycle()
+		}
+	}
+	schedulerErr := error(nil)
+	if runtime.scheduler == nil {
+		schedulerErr = errSchedulerShutdown
+	} else {
+		schedulerErr = shutdownWithTimeout(runtime.scheduler.Shutdown, runtimeCleanupTimeout)
+	}
+	if schedulerErr != nil {
+		runtime.retainStateForLifecycle()
+	}
+
+	// An active Serve must classify its result before state can be closed. The
+	// wait is bounded too: an unprocessed exit is itself not proof of safety.
+	serveExitProcessed := runtime.waitForServeExit()
+	if !serveExitProcessed {
+		runtime.retainStateForLifecycle()
+	}
+
 	httpStopped := serverErr == nil || errors.Is(serverErr, http.ErrServerClosed)
-	if httpStopped && !runtime.retainState.Load() && liveInventoryErr == nil && validationErr == nil {
+	listenerStopped := listenerErr == nil || errors.Is(listenerErr, net.ErrClosed)
+	if httpStopped && listenerStopped && !runtime.retainState.Load() && liveInventoryErr == nil && validationErr == nil && schedulerErr == nil {
 		if stateErr := runtime.closeState(); stateErr != nil {
+			runtime.retainStateForLifecycle()
 			return stateErr
 		}
+	}
+	if schedulerErr != nil {
+		return errSchedulerShutdown
 	}
 	if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
 		return serverErr
 	}
 	if listenerErr != nil && !errors.Is(listenerErr, net.ErrClosed) {
 		return listenerErr
+	}
+	if liveInventoryErr != nil {
+		return liveInventoryErr
+	}
+	if validationErr != nil {
+		return validationErr
+	}
+	if !httpStopped || !listenerStopped || !serveExitProcessed {
+		return errServeShutdown
+	}
+	// retainState can be set by an already-classified unexpected Serve exit;
+	// that is intentionally fail-closed but is not a second Shutdown error.
+	return nil
+}
+
+func (runtime *HTTPRuntime) waitForServeExit() bool {
+	runtime.lifecycleMu.Lock()
+	active := runtime.serveActive
+	done := runtime.serveExitDone
+	runtime.lifecycleMu.Unlock()
+	if !active {
+		return true
+	}
+	if done == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeCleanupTimeout)
+	defer cancel()
+	select {
+	case <-done:
+		return true
+	default:
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		// Prefer a classification that raced the deadline over retaining due
+		// solely to select choice; the channel close is the proof event.
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+func (runtime *HTTPRuntime) unexpectedShutdown() error {
+	if runtime.server != nil {
+		_ = runtime.server.Close()
+	}
+	if runtime.listener != nil {
+		_ = runtime.listener.Close()
+	}
+	runtime.retainStateForLifecycle()
+
+	// Unexpected Serve exits always retain state. Stop each worker with an
+	// independent bounded context so one non-cooperative service cannot poison
+	// scheduler shutdown.
+	liveInventoryErr := error(nil)
+	if runtime.liveInventory != nil {
+		liveInventoryErr = shutdownWithTimeout(runtime.liveInventory.Shutdown, runtimeCleanupTimeout)
+	}
+	validationErr := error(nil)
+	if runtime.validation != nil {
+		validationErr = shutdownWithTimeout(runtime.validation.Shutdown, runtimeCleanupTimeout)
+	}
+	schedulerErr := error(nil)
+	if runtime.scheduler == nil {
+		schedulerErr = errSchedulerShutdown
+	} else {
+		schedulerErr = shutdownWithTimeout(runtime.scheduler.Shutdown, runtimeCleanupTimeout)
+	}
+	if schedulerErr != nil {
+		return errSchedulerShutdown
 	}
 	if liveInventoryErr != nil {
 		return liveInventoryErr

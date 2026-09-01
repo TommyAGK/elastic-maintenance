@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, and Phase 3.3.4a complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, and the standalone durable scheduler core are implemented. Scheduler runtime integration, remaining durable jobs/audit, planning, and API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, and Phase 3.3.4b complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, and scheduler runtime lifecycle integration are implemented. Remaining durable jobs/audit, planning, and API work remain.
 
 ## Objective
 
@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.4a is complete; 3.3.4b through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.4b is complete; 3.3.5 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -91,13 +91,16 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Verification:** `internal/jobscheduler/scheduler_test.go` covers real `statefs`/`jobrecord` lifecycle, exact capacity and concurrency, submit-context disconnect, pre-canceled admission, success/failure/panic/invalid results, shutdown cancellation/idempotency/barrier races, non-cooperative executor retry, stale start/finish ownership, malformed ETags, persistence timeouts, post-rename unknown Create outcomes, persistence-failure health sentinels, metadata/link preservation, and concurrent submissions. `go test ./internal/jobscheduler`, `go test -race ./internal/jobscheduler`, `go test ./...`, `go vet ./...`, and `git diff --check` pass. Verification timestamp: 2026-08-31T12:39:45Z. No runtime/service/route adapter, restart resumption, idempotency, cancellation API, SSE, planning, or audit was added.
 - **Next:** 3.3.4b — integrate scheduler runtime lifecycle.
 
-#### 3.3.4b Integrate scheduler runtime lifecycle
+#### 3.3.4b Integrate scheduler runtime lifecycle — **Complete**
 
 - **Scope:** Construct the scheduler only after 3.3.2b startup recovery, retain it in `HTTPRuntime`, and shut it down before closing the durable state store. Keep all existing request services on their current executors until their durable input/result adapters exist; do not imply that process-local validation or live-inventory jobs have become durable.
 - **Dependencies:** 3.3.4a and the Phase 3.2/3.3.2b runtime lifecycle.
 - **Definition of done:** No scheduler starts before recovery; listener/service construction failures stop it and release state; normal and timeout shutdown ordering is deterministic; readiness fails after fatal scheduler persistence failure; zero registered route adapters cannot execute work.
 - **Focused verification:** Constructor ordering, recovery failure, listener failure, normal shutdown, scheduler timeout/fatal health, state-lock cleanup, and no-work startup tests pass without changing existing endpoint behavior.
 - **Worker boundary:** A runtime-lifecycle worker owns server construction/readiness/shutdown integration only; it does not adapt route submissions, alter persisted formats, or implement job read/cancellation/SSE APIs.
+- **Evidence:** `internal/server` defines the minimal scheduler lifecycle seam, constructs the default `jobscheduler` with fixed `Workers=1` and `QueueCapacity=32` (using the scheduler core persistence-timeout default) only after recovered `*jobrecord.FileRepository` recovery, retains the scheduler beside the repository, and performs no submissions or durable-record enumeration. Constructor cleanup uses bounded scheduler shutdown before listener/state cleanup; normal shutdown orders HTTP/current services, scheduler, and state close; scheduler failures/timeouts retain the state descriptors/process lock and return fixed safe lifecycle errors; unexpected Serve exits force-close current services, bounded-shut down the scheduler, and retain state. Readiness includes scheduler health without exposing diagnostics. The `newHTTPRuntimeWithSchedulerFactory` seam and lifecycle tests cover recovery/factory/listener ordering, no listener on early failure, no-work startup, health recovery, cleanup ordering, safe scheduler failures/timeouts, lock retention/reopen behavior, idempotent shutdown, and unchanged endpoint behavior.
+- **Verification:** `go test ./internal/server`, `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` pass. Verification timestamp: 2026-09-01T09:49:54Z.
+- **Next:** 3.3.5 — expose authenticated job list and polling projections. HTTP/SSE, cancellation mutation, audit, diffing, and saved plans remain future work.
 
 #### 3.3.5 Expose authenticated job list and polling projections
 
@@ -370,7 +373,7 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 #### 3.9.7 Return asynchronous planning jobs and gate publication
 
 - **Scope:** Implement `POST /api/v1/plans` as an authenticated asynchronous operation returning `202` and a job ID, and expose a plan only after the durable job reaches successful completion. Preserve cookie/bearer separation and the existing CSRF and same-origin requirements for cookie-authenticated mutation.
-- **Dependencies:** 3.3.4, 3.3.5, 3.3.6, 3.9.1, 3.9.2, and 3.9.6.
+- **Dependencies:** 3.3.4b, 3.3.5, 3.3.6, 3.9.1, 3.9.2, and 3.9.6.
 - **Definition of done:** Request handling is bounded and side-effect-safe under retries; the response contains only the safe job reference, polling/SSE observes progress, and failed/running jobs cannot be read as saved applicable plans.
 - **Focused verification:** Test response status/body, duplicate requests, disconnect before completion, polling/SSE, restart at each publication boundary, queued/running/succeeded/failed/canceled/interrupted visibility, cookie Origin/CSRF failures, bearer-only success, and cookie-plus-bearer ambiguity.
 - **Worker boundary:** A planning-route worker owns HTTP enqueue/publication gating and transport checks; it does not own scheduler limits, plan construction, or UI display.
