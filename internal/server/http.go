@@ -102,6 +102,7 @@ type HandlerOptions struct {
 	AuditRecorder        audit.Recorder
 	BreakGlassAuth       BreakGlassAuthenticator
 	ValidationBackend    ValidationBackend
+	JobReadBackend       JobReadBackend
 	CredentialBackend    CredentialBackend
 	LiveInventoryBackend LiveInventoryBackend
 	PublicURL            string
@@ -435,7 +436,7 @@ func newHTTPRuntimeWithSchedulerFactoryAndHooks(
 		return nil, fmt.Errorf("create live inventory service: %w", err)
 	}
 	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, stateStore: stateStore, jobRepository: jobRepository, scheduler: scheduler, recovery: recoverySummary, build: normalizedBuild, shutdownDone: make(chan struct{})}
-	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.isReady, ValidationBackend: validationService, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
+	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.isReady, ValidationBackend: validationService, JobReadBackend: jobRepository, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)
 		handlerOptions.Authenticator = auth.NewRequestAuthenticator(sessions, bearerAuth)
@@ -828,6 +829,9 @@ func NewHandler(options HandlerOptions) http.Handler {
 	if options.ValidationBackend == nil {
 		options.ValidationBackend = unavailableValidationBackend{}
 	}
+	if options.JobReadBackend == nil {
+		options.JobReadBackend = unavailableJobReadBackend{}
+	}
 	if options.CredentialBackend == nil {
 		options.CredentialBackend = unavailableCredentialBackend{}
 	}
@@ -895,8 +899,8 @@ func NewHandler(options HandlerOptions) http.Handler {
 	}
 	protectedMux.Handle("/api/v1/plans", jobCollectionHandler(authorizer, auth.PermissionPlansRead, auth.PermissionPlansCreate, "plan"))
 	protectedMux.Handle("/api/v1/plans/", planSubresourceHandler(authorizer))
-	protectedMux.Handle("/api/v1/jobs", authorize(authorizer, auth.PermissionJobsRead, readPlaceholder("job inventory")))
-	protectedMux.Handle("/api/v1/jobs/", detailReadHandler("/api/v1/jobs/", authorizer, auth.PermissionJobsRead, "job"))
+	protectedMux.Handle("/api/v1/jobs", authorize(authorizer, auth.PermissionJobsRead, jobCollectionReadHandler(options.JobReadBackend)))
+	protectedMux.Handle("/api/v1/jobs/", authorize(authorizer, auth.PermissionJobsRead, jobDetailHandler(options.JobReadBackend)))
 	protectedMux.Handle("/api/v1/reports", authorize(authorizer, auth.PermissionReportsRead, readPlaceholder("report inventory")))
 	protectedMux.Handle("/api/v1/reports/", detailReadHandler("/api/v1/reports/", authorizer, auth.PermissionReportsRead, "report"))
 	protectedMux.Handle("/api/v1/audit", authorize(authorizer, auth.PermissionAuditRead, readPlaceholder("audit inventory")))

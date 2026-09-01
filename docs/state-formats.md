@@ -1,6 +1,6 @@
 # Persisted state formats
 
-**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Phase 3.3.3 adds repository behavior without changing this state schema or version. Phase 3.2 hardened state-directory runtime integration, Phase 3.3.1 durable job-record persistence, Phase 3.3.2a fail-closed recovery policy/transition, Phase 3.3.2b bounded startup job recovery, and Phase 3.3.3 durable scoped idempotency persistence are also complete; see `docs/operations/state-directory.md` for that production contract. Phase 3 as a whole is **not passed**; scheduling, remaining durable jobs/audit, planning, and API work remain later substeps.
+**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Later repository, scheduler, and HTTP read work does not change this state schema or version. Phase 3.2 hardened state-directory runtime integration and Phase 3.3 work through authenticated durable job polling (3.3.5) are complete; see `docs/operations/state-directory.md` for the production storage contract and the Phase 3 subplan for implementation evidence. Phase 3 as a whole is **not passed**; SSE/cancellation, durable audit, planning, and later API work remain.
 
 ## Contract envelope
 

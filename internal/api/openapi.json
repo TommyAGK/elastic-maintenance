@@ -3,7 +3,7 @@
   "info": {
     "title": "Elastic Maintainer API",
     "version": "v1alpha1",
-    "description": "Initial web-first API contract. Endpoints marked with 501 responses are registered skeletons whose domain execution lands in later phases."
+    "description": "Initial web-first API contract. Endpoints marked with 501 responses are registered skeletons whose domain execution lands in later phases. Documented GET read operations also accept HEAD with identical status and headers and no response body."
   },
   "security": [
     {
@@ -777,6 +777,62 @@
     "/api/v1/jobs": {
       "get": {
         "operationId": "listJobs",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageSize"
+          },
+          {
+            "$ref": "#/components/parameters/PageToken"
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "description": "Repeatable exact job type filter; at most 16 values and no duplicates.",
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "validation",
+                  "plan",
+                  "apply",
+                  "target-inventory"
+                ]
+              }
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "description": "Repeatable exact job status filter; at most 16 values and no duplicates.",
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "running",
+                  "succeeded",
+                  "failed",
+                  "canceled",
+                  "interrupted"
+                ]
+              }
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Jobs",
@@ -788,8 +844,14 @@
               }
             }
           },
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
           },
           "409": {
             "$ref": "#/components/responses/APIError"
@@ -819,10 +881,16 @@
               }
             }
           },
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "400": {
+            "$ref": "#/components/responses/APIError"
           },
-          "409": {
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
             "$ref": "#/components/responses/APIError"
           },
           "503": {
@@ -1924,6 +1992,7 @@
       },
       "JobResponse": {
         "type": "object",
+        "additionalProperties": false,
         "required": [
           "apiVersion",
           "job"
@@ -1954,6 +2023,7 @@
       },
       "JobListResponse": {
         "type": "object",
+        "additionalProperties": false,
         "required": [
           "apiVersion",
           "jobs"

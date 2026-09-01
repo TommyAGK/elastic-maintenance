@@ -129,6 +129,7 @@ func TestOpenAPIUnfinishedRoutesAreExplicit(t *testing.T) {
 		"GET /api/v1/targets/{targetId}/credential-status": true, "PUT /api/v1/targets/{targetId}/credentials": true, "DELETE /api/v1/targets/{targetId}/credentials": true,
 		"GET /api/v1/targets/{targetId}/readiness": true, "GET /api/v1/targets/{targetId}/version": true, "POST /api/v1/targets/{targetId}/inventory": true, "GET /api/v1/targets/{targetId}/inventory/{jobId}": true,
 		"GET /api/v1/validations": true, "POST /api/v1/validations": true, "GET /api/v1/validations/{jobId}": true,
+		"GET /api/v1/jobs": true, "GET /api/v1/jobs/{jobId}": true,
 	}
 	for path, rawPathItem := range paths {
 		for method, rawOperation := range rawPathItem.(map[string]any) {

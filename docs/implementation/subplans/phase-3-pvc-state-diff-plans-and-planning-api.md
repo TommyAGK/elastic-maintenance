@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, and Phase 3.3.4b complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, and scheduler runtime lifecycle integration are implemented. Remaining durable jobs/audit, planning, and API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, Phase 3.3.4b, and Phase 3.3.5 complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, scheduler runtime lifecycle integration, and authenticated durable job read/polling projections are implemented. Remaining durable jobs/audit, planning, and API work remain.
 
 ## Objective
 
@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.4b is complete; 3.3.5 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.5 is complete; 3.3.6 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -100,15 +100,18 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Worker boundary:** A runtime-lifecycle worker owns server construction/readiness/shutdown integration only; it does not adapt route submissions, alter persisted formats, or implement job read/cancellation/SSE APIs.
 - **Evidence:** `internal/server` defines the minimal scheduler lifecycle seam, constructs the default `jobscheduler` with fixed `Workers=1` and `QueueCapacity=32` (using the scheduler core persistence-timeout default) only after recovered `*jobrecord.FileRepository` recovery, retains the scheduler beside the repository, and performs no submissions or durable-record enumeration. Constructor cleanup uses bounded scheduler shutdown before listener/state cleanup; normal shutdown orders HTTP/current services, scheduler, and state close; scheduler failures/timeouts retain the state descriptors/process lock and return fixed safe lifecycle errors; unexpected Serve exits force-close current services, bounded-shut down the scheduler, and retain state. Readiness includes scheduler health without exposing diagnostics. The `newHTTPRuntimeWithSchedulerFactory` seam and lifecycle tests cover recovery/factory/listener ordering, no listener on early failure, no-work startup, health recovery, cleanup ordering, safe scheduler failures/timeouts, lock retention/reopen behavior, idempotent shutdown, and unchanged endpoint behavior.
 - **Verification:** `go test ./internal/server`, `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` pass. Verification timestamp: 2026-09-01T09:49:54Z.
-- **Next:** 3.3.5 — expose authenticated job list and polling projections. HTTP/SSE, cancellation mutation, audit, diffing, and saved plans remain future work.
+- **Next:** 3.3.5 — expose authenticated job list and polling projections (now complete; see below).
 
-#### 3.3.5 Expose authenticated job list and polling projections
+#### 3.3.5 Expose authenticated job list and polling projections — **Complete**
 
 - **Scope:** Project durable job state into the existing authenticated `Get` and paginated `List` read projections. Keep projections safe and make polling the authoritative fallback; do not add browser-dependent execution semantics.
 - **Dependencies:** 3.3.1 and 3.3.4b; `internal/jobs.Queue.Get`/`List` and `ListOptions` contracts, Phase 2 substeps 2.1–2.4 authentication/RBAC, and Phase 1 substep 1.8 API response/pagination conventions.
 - **Definition of done:** Authorized viewers can retrieve one job or bounded filtered pages of jobs, unauthorized callers are denied, all existing statuses are representable, and reads do not alter execution or persisted state.
 - **Focused verification:** Test role authorization, malformed/unknown job IDs, each status including `canceled` and `interrupted`, type/status filters, first/middle/last/empty pages, invalid page bounds/tokens, polling after restart, and response sentinel scans.
 - **Worker boundary:** A job-read worker owns `Get`/`List` handlers, serializers, and pagination only; it does not own queue scheduling, cancellation transitions, SSE, or planning.
+- **Evidence:** `internal/server/jobs.go` defines the read-only `JobReadBackend` over durable `jobrecord.Get`/`List`, performs the state-to-public `jobs.Job` redaction, strictly parses bounded page/filter query values, passes repository tokens directly, and maps not-found/page-change/invalid/options/backend errors to fixed safe responses. `HandlerOptions` receives the recovered production `*jobrecord.FileRepository`; `/api/v1/jobs` and `/api/v1/jobs/{jobId}` provide authenticated GET/HEAD handlers, and `api.JobResponse` supplies the versioned detail envelope. `internal/server/jobs_test.go` covers absent/denied/viewer and inherited roles, all current types/statuses, safe projection/sentinel scans, strict query edges, opaque tokens, real statefs/jobrecord pages, combined type/status filtering, empty/filtered pages, mutation conflicts, unchanged bytes, restart polling, and a production-runtime recovery/authentication/read path. `internal/api/openapi.json` documents repeatable exact enum filters and the actual 200/400/401/403/404/409/503 read responses without 501.
+- **Verification:** `go test ./internal/server ./internal/api`, `go test ./...`, focused/full race tests, `go vet ./...`, `make build`, `python3 scripts/verify-contract-fixtures.py`, and `git diff --check` pass. Verification timestamp: 2026-09-01T11:05:23Z.
+- **Next:** 3.3.6 — expose authenticated SSE and existing cancellation projection. SSE, cancellation mutation, audit, diffing, and saved plans remain future work.
 
 #### 3.3.6 Expose authenticated SSE and existing cancellation projection
 

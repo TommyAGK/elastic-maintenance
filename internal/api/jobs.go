@@ -22,6 +22,11 @@ type ApplyCreateRequest struct {
 	Confirm bool `json:"confirm"`
 }
 
+type JobResponse struct {
+	APIVersion string   `json:"apiVersion"`
+	Job        jobs.Job `json:"job"`
+}
+
 type JobAcceptedResponse struct {
 	APIVersion string   `json:"apiVersion"`
 	Job        jobs.Job `json:"job"`
