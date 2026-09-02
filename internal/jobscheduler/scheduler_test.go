@@ -229,6 +229,11 @@ func TestSchedulerShutdownCancelsRunningAndQueuedAndIsIdempotent(t *testing.T) {
 		if record.Job.Status != jobs.StatusCanceled || record.Job.FailureCode != "" || record.Job.FinishedAt == nil {
 			t.Fatalf("shutdown %s=%#v", id, record.Job)
 		}
+		assertSchedulerMarkersEmpty(t, scheduler, id)
+	}
+	assertSchedulerMarkerMapsEmpty(t, scheduler)
+	if got := len(scheduler.slots); got != 0 {
+		t.Fatalf("shutdown slot tokens=%d, want zero", got)
 	}
 	if _, err := scheduler.Submit(context.Background(), Submission{Job: schedulerTestJob("after-close", jobs.TypeValidation), Executor: func(context.Context, state.Job) ExecutionResult {
 		return ExecutionResult{Outcome: ExecutionSucceeded}

@@ -69,7 +69,8 @@ var (
 )
 
 // Record is a validated durable job and the SHA-256 ETag of its stored strict
-// JSON bytes. Repository writes are canonical, and content-derived ETags are
+// JSON bytes. Create/Put writes are canonical; the narrow cancellation flag
+// mutation preserves already-valid non-flag bytes. Content-derived ETags are
 // stable across process restarts.
 type Record struct {
 	Job  state.Job `json:"job"`
@@ -96,6 +97,7 @@ type Repository interface {
 	Create(context.Context, state.Job) (Record, error)
 	Get(context.Context, string) (Record, error)
 	Put(context.Context, string, state.Job, string) (Record, error)
+	RequestCancellation(context.Context, string, string) (Record, error)
 	Interrupt(context.Context, string, string, time.Time, jobrecovery.FailureCode) (Record, error)
 	Recover(context.Context, time.Time) (RecoverySummary, error)
 	List(context.Context, jobs.ListOptions) (Page, error)
@@ -191,8 +193,8 @@ func (repository *FileRepository) Get(ctx context.Context, id string) (Record, e
 // expected content ETag, preserves immutable/append-only metadata, and
 // requires one of jobs.CanTransition's existing status transitions. The
 // exceptional queued/running-to-interrupted transition is reserved for
-// Interrupt. Same-status cancellation mutation belongs to the later
-// cancellation increment.
+// Interrupt, and same-status cancellation mutation is reserved for
+// RequestCancellation.
 func (repository *FileRepository) Put(ctx context.Context, id string, replacement state.Job, expectedETag string) (Record, error) {
 	if err := contextErr(ctx); err != nil {
 		return Record{}, err
@@ -237,6 +239,12 @@ func (repository *FileRepository) Put(ctx context.Context, id string, replacemen
 	if !jobs.CanTransition(current.Job.Status, replacement.Status) {
 		return Record{}, jobs.ErrInvalidTransition
 	}
+	// The caller context gates the operation until this point. Once the
+	// descriptor-relative CAS begins, statefs does not cancel it; its outcome
+	// is authoritative even if ctx is canceled concurrently.
+	if err := contextErr(ctx); err != nil {
+		return Record{}, err
+	}
 	if err := repository.store.WriteAtomicIfMatch(jobPath(id), encoded, expectedETag); err != nil {
 		switch {
 		case errors.Is(err, statefs.ErrETagMismatch):
@@ -248,6 +256,77 @@ func (repository *FileRepository) Put(ctx context.Context, id string, replacemen
 		}
 	}
 	return Record{Job: replacement, ETag: etag(encoded)}, nil
+}
+
+// RequestCancellation durably requests cancellation by changing only the
+// cancellationRequested flag on a queued or running record. A request already
+// observed on a queued/running record is an idempotent no-op, as is replaying a
+// canceled record whose flag is already set. Only the false state is protected
+// by expectedETag; this lets concurrent retries replay the winning request.
+func (repository *FileRepository) RequestCancellation(ctx context.Context, id, expectedETag string) (Record, error) {
+	if err := contextErr(ctx); err != nil {
+		return Record{}, err
+	}
+	if !jobIDPattern.MatchString(id) {
+		return Record{}, jobs.ErrNotFound
+	}
+	if err := repository.acquire(ctx); err != nil {
+		return Record{}, err
+	}
+	defer repository.release()
+
+	current, encoded, err := repository.readEncodedLocked(id)
+	if err != nil {
+		return Record{}, err
+	}
+	if err := contextErr(ctx); err != nil {
+		return Record{}, err
+	}
+
+	switch current.Job.Status {
+	case jobs.StatusQueued, jobs.StatusRunning:
+		if current.Job.CancellationRequested {
+			return current, nil
+		}
+		if !sameETag(current.ETag, expectedETag) {
+			return Record{}, jobs.ErrConflict
+		}
+		if err := contextErr(ctx); err != nil {
+			return Record{}, err
+		}
+		replacement, err := cancellationReplacement(encoded)
+		if err != nil {
+			return Record{}, err
+		}
+		if err := contextErr(ctx); err != nil {
+			return Record{}, err
+		}
+		// All caller-gated work is complete before this descriptor-relative CAS
+		// begins. The statefs write is not cancellable, so its result remains
+		// authoritative if ctx is canceled concurrently. The replacement keeps
+		// the original validated bytes except for this flag; scheduler-owned
+		// callers separately require canonical bytes before accepting the result.
+		if err := repository.store.WriteAtomicIfMatch(jobPath(id), replacement, expectedETag); err != nil {
+			switch {
+			case errors.Is(err, statefs.ErrETagMismatch):
+				return Record{}, jobs.ErrConflict
+			case errors.Is(err, statefs.ErrNotFound):
+				return Record{}, jobs.ErrNotFound
+			default:
+				return Record{}, err
+			}
+		}
+		requested := current.Job
+		requested.CancellationRequested = true
+		return Record{Job: requested, ETag: etag(replacement)}, nil
+	case jobs.StatusCanceled:
+		if current.Job.CancellationRequested {
+			return current, nil
+		}
+		return Record{}, jobs.ErrCancellationUnsupported
+	default:
+		return Record{}, jobs.ErrCancellationUnsupported
+	}
 }
 
 // Interrupt performs the exceptional queued/running to interrupted recovery
@@ -808,14 +887,23 @@ func isLowerHexDigest(value string) bool {
 }
 
 func (repository *FileRepository) readLocked(id string) (Record, error) {
+	record, _, err := repository.readEncodedLocked(id)
+	return record, err
+}
+
+func (repository *FileRepository) readEncodedLocked(id string) (Record, []byte, error) {
 	encoded, err := repository.store.Read(jobPath(id))
 	if err != nil {
 		if errors.Is(err, statefs.ErrNotFound) {
-			return Record{}, jobs.ErrNotFound
+			return Record{}, nil, jobs.ErrNotFound
 		}
-		return Record{}, err
+		return Record{}, nil, err
 	}
-	return decodeRecord(id, encoded)
+	record, err := decodeRecord(id, encoded)
+	if err != nil {
+		return Record{}, nil, err
+	}
+	return record, encoded, nil
 }
 
 func decodeRecord(id string, encoded []byte) (Record, error) {
@@ -836,6 +924,113 @@ func decodeRecord(id string, encoded []byte) (Record, error) {
 }
 
 func jobPath(id string) string { return statefs.JobsDir + "/" + id + ".json" }
+
+// cancellationReplacement changes only the root cancellationRequested value
+// in the already validated document. Keeping the original bytes avoids
+// needlessly reformatting or re-encoding every immutable field.
+func cancellationReplacement(encoded []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	first, err := decoder.Token()
+	if err != nil || first != json.Delim('{') {
+		return nil, statefs.ErrCorrupt
+	}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, statefs.ErrCorrupt
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, statefs.ErrCorrupt
+		}
+		keyEnd := decoder.InputOffset()
+		if key == "cancellationRequested" {
+			valueStart := jsonValueStart(encoded, keyEnd)
+			valueToken, err := decoder.Token()
+			valueEnd := decoder.InputOffset()
+			value, ok := valueToken.(bool)
+			if err != nil || !ok || value || valueStart < 0 || valueEnd < int64(valueStart) || int(valueEnd) > len(encoded) || !bytes.Equal(encoded[valueStart:int(valueEnd)], []byte("false")) {
+				return nil, statefs.ErrCorrupt
+			}
+			replacement := make([]byte, 0, len(encoded)+1)
+			replacement = append(replacement, encoded[:valueStart]...)
+			replacement = append(replacement, "true"...)
+			replacement = append(replacement, encoded[valueEnd:]...)
+			return replacement, nil
+		}
+		if err := skipJSONValue(decoder); err != nil {
+			return nil, statefs.ErrCorrupt
+		}
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') {
+		return nil, statefs.ErrCorrupt
+	}
+	insertAt := int(decoder.InputOffset()) - 1
+	if insertAt < 0 || insertAt >= len(encoded) || encoded[insertAt] != '}' {
+		return nil, statefs.ErrCorrupt
+	}
+	replacement := make([]byte, 0, len(encoded)+len(`,"cancellationRequested":true`))
+	replacement = append(replacement, encoded[:insertAt]...)
+	replacement = append(replacement, `,"cancellationRequested":true`...)
+	replacement = append(replacement, encoded[insertAt:]...)
+	return replacement, nil
+}
+
+func jsonValueStart(encoded []byte, keyEnd int64) int {
+	position := int(keyEnd)
+	if position < 0 || position > len(encoded) {
+		return -1
+	}
+	for position < len(encoded) && isJSONWhitespace(encoded[position]) {
+		position++
+	}
+	if position >= len(encoded) || encoded[position] != ':' {
+		return -1
+	}
+	position++
+	for position < len(encoded) && isJSONWhitespace(encoded[position]) {
+		position++
+	}
+	return position
+}
+
+func isJSONWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
+}
+
+func skipJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || (delimiter != '{' && delimiter != '[') {
+		return nil
+	}
+	for decoder.More() {
+		if delimiter == '{' {
+			key, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if _, ok := key.(string); !ok {
+				return errors.New("object key is not a string")
+			}
+		}
+		if err := skipJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	end, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if end != json.Delim(map[json.Delim]json.Delim{'{': '}', '[': ']'}[delimiter]) {
+		return errors.New("JSON value is not closed")
+	}
+	return nil
+}
 
 func etag(encoded []byte) string {
 	digest := sha256.Sum256(encoded)
