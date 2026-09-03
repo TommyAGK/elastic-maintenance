@@ -93,20 +93,22 @@ type BrowserAuthenticator interface {
 }
 
 type HandlerOptions struct {
-	Logger               *slog.Logger
-	IsReady              func() bool
-	Authenticator        auth.Authenticator
-	Authorizer           auth.Authorizer
-	BrowserAuth          BrowserAuthenticator
-	LogoutAuth           BrowserAuthenticator
-	AuditRecorder        audit.Recorder
-	BreakGlassAuth       BreakGlassAuthenticator
-	ValidationBackend    ValidationBackend
-	JobReadBackend       JobReadBackend
-	CredentialBackend    CredentialBackend
-	LiveInventoryBackend LiveInventoryBackend
-	PublicURL            string
-	TrustedProxies       []string
+	Logger                 *slog.Logger
+	IsReady                func() bool
+	Authenticator          auth.Authenticator
+	Authorizer             auth.Authorizer
+	BrowserAuth            BrowserAuthenticator
+	LogoutAuth             BrowserAuthenticator
+	AuditRecorder          audit.Recorder
+	BreakGlassAuth         BreakGlassAuthenticator
+	ValidationBackend      ValidationBackend
+	JobReadBackend         JobReadBackend
+	JobCancellationBackend JobCancellationBackend
+	CancellationPolicy     jobs.CancellationPolicy
+	CredentialBackend      CredentialBackend
+	LiveInventoryBackend   LiveInventoryBackend
+	PublicURL              string
+	TrustedProxies         []string
 }
 
 // schedulerLifecycle is the only scheduler surface owned by the HTTP
@@ -345,6 +347,10 @@ func newHTTPRuntimeWithSchedulerFactoryAndHooks(
 	}
 
 	securityAudit := audit.LogRecorder{Logger: logger}
+	var cancellationBackend JobCancellationBackend
+	if capability, ok := scheduler.(JobCancellationBackend); ok {
+		cancellationBackend = capability
+	}
 	var browserAuth BrowserAuthenticator
 	var logoutAuth BrowserAuthenticator
 	var oidcAuth *auth.BrowserOIDC
@@ -436,7 +442,7 @@ func newHTTPRuntimeWithSchedulerFactoryAndHooks(
 		return nil, fmt.Errorf("create live inventory service: %w", err)
 	}
 	runtime := &HTTPRuntime{listener: listener, validation: validationService, targetClients: targetClients, liveInventory: liveInventory, stateStore: stateStore, jobRepository: jobRepository, scheduler: scheduler, recovery: recoverySummary, build: normalizedBuild, shutdownDone: make(chan struct{})}
-	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.isReady, ValidationBackend: validationService, JobReadBackend: jobRepository, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
+	handlerOptions := HandlerOptions{Logger: logger, IsReady: runtime.isReady, ValidationBackend: validationService, JobReadBackend: jobRepository, JobCancellationBackend: cancellationBackend, BrowserAuth: browserAuth, LogoutAuth: logoutAuth, BreakGlassAuth: breakGlassAuth, AuditRecorder: securityAudit, CredentialBackend: credentialService, LiveInventoryBackend: liveInventory, PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies}
 	if len(authenticators) != 0 {
 		sessions := auth.NewCompositeAuthenticator(authenticators...)
 		handlerOptions.Authenticator = auth.NewRequestAuthenticator(sessions, bearerAuth)
@@ -810,6 +816,14 @@ func (runtime *HTTPRuntime) unexpectedShutdown() error {
 }
 
 func NewHandler(options HandlerOptions) http.Handler {
+	return newHandlerWithJobEventOptions(options, jobEventOptions{})
+}
+
+// newHandlerWithJobEventOptions is an unexported stream-bound test seam. The
+// public constructor always uses the production bounds in job_events.go.
+func newHandlerWithJobEventOptions(options HandlerOptions, eventOptions jobEventOptions) http.Handler {
+	eventOptions = eventOptions.normalized()
+	eventLimiter := newJobEventLimiter(eventOptions.MaxStreams)
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -831,6 +845,12 @@ func NewHandler(options HandlerOptions) http.Handler {
 	}
 	if options.JobReadBackend == nil {
 		options.JobReadBackend = unavailableJobReadBackend{}
+	}
+	if options.JobCancellationBackend == nil {
+		options.JobCancellationBackend = unavailableJobCancellationBackend{}
+	}
+	if options.CancellationPolicy == nil {
+		options.CancellationPolicy = defaultJobCancellationPolicy{}
 	}
 	if options.CredentialBackend == nil {
 		options.CredentialBackend = unavailableCredentialBackend{}
@@ -900,7 +920,7 @@ func NewHandler(options HandlerOptions) http.Handler {
 	protectedMux.Handle("/api/v1/plans", jobCollectionHandler(authorizer, auth.PermissionPlansRead, auth.PermissionPlansCreate, "plan"))
 	protectedMux.Handle("/api/v1/plans/", planSubresourceHandler(authorizer))
 	protectedMux.Handle("/api/v1/jobs", authorize(authorizer, auth.PermissionJobsRead, jobCollectionReadHandler(options.JobReadBackend)))
-	protectedMux.Handle("/api/v1/jobs/", authorize(authorizer, auth.PermissionJobsRead, jobDetailHandler(options.JobReadBackend)))
+	protectedMux.Handle("/api/v1/jobs/", jobSubresourceHandler(options.JobReadBackend, options.JobCancellationBackend, options.CancellationPolicy, authorizer, eventOptions, options.CredentialBackend, options.PublicURL, options.TrustedProxies, eventLimiter))
 	protectedMux.Handle("/api/v1/reports", authorize(authorizer, auth.PermissionReportsRead, readPlaceholder("report inventory")))
 	protectedMux.Handle("/api/v1/reports/", detailReadHandler("/api/v1/reports/", authorizer, auth.PermissionReportsRead, "report"))
 	protectedMux.Handle("/api/v1/audit", authorize(authorizer, auth.PermissionAuditRead, readPlaceholder("audit inventory")))
@@ -1093,6 +1113,10 @@ func auditedMutations(recorder audit.Recorder, logger *slog.Logger, next http.Ha
 			action = string(audit.ActionPlanCreate)
 		} else if r.Method == http.MethodPost && len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "plans" && requestIDPattern.MatchString(parts[3]) && parts[4] == "apply" {
 			action = string(audit.ActionPlanApply)
+		} else if r.Method == http.MethodPost {
+			if id, ok := exactJobActionID(r.URL.Path, "cancel"); ok && requestIDPattern.MatchString(id) {
+				action = string(audit.ActionJobCancel)
+			}
 		} else if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "targets" && requestIDPattern.MatchString(parts[3]) && parts[4] == "credentials" {
 			if r.Method == http.MethodPut {
 				action = string(audit.ActionCredentialUpload)

@@ -23,6 +23,7 @@ const (
 	ActionTargetInventoryCreate Action = "targets.inventory.create"
 	ActionPlanCreate            Action = "plans.create"
 	ActionPlanApply             Action = "plans.apply"
+	ActionJobCancel             Action = "jobs.cancel"
 )
 
 type Outcome string
@@ -38,7 +39,7 @@ var (
 	knownActions     = map[Action]struct{}{
 		ActionLogin: {}, ActionBreakGlassLogin: {}, ActionLogout: {},
 		ActionCredentialUpload: {}, ActionCredentialRotate: {}, ActionCredentialDelete: {},
-		ActionValidationCreate: {}, ActionTargetInventoryCreate: {}, ActionPlanCreate: {}, ActionPlanApply: {},
+		ActionValidationCreate: {}, ActionTargetInventoryCreate: {}, ActionPlanCreate: {}, ActionPlanApply: {}, ActionJobCancel: {},
 	}
 )
 

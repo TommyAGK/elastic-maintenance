@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, Phase 3.3.4b, Phase 3.3.5, and Phase 3.3.6a complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, scheduler runtime lifecycle integration, authenticated durable job read/polling projections, and the durable cooperative cancellation mutation core are implemented. Remaining authenticated HTTP/SSE cancellation, durable jobs/audit, planning, and API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, Phase 3.3.4b, Phase 3.3.5, Phase 3.3.6a, and Phase 3.3.6b complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, scheduler runtime lifecycle integration, authenticated durable job read/polling projections, durable cooperative cancellation, authenticated HTTP cancellation, and bounded SSE job projections are implemented. Durable audit, planning, and later API work remain.
 
 ## Objective
 
@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.6a is complete; 3.3.6b through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.6b is complete; 3.4.1 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -111,7 +111,7 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Worker boundary:** A job-read worker owns `Get`/`List` handlers, serializers, and pagination only; it does not own queue scheduling, cancellation transitions, SSE, or planning.
 - **Evidence:** `internal/server/jobs.go` defines the read-only `JobReadBackend` over durable `jobrecord.Get`/`List`, performs the state-to-public `jobs.Job` redaction, strictly parses bounded page/filter query values, passes repository tokens directly, and maps not-found/page-change/invalid/options/backend errors to fixed safe responses. `HandlerOptions` receives the recovered production `*jobrecord.FileRepository`; `/api/v1/jobs` and `/api/v1/jobs/{jobId}` provide authenticated GET/HEAD handlers, and `api.JobResponse` supplies the versioned detail envelope. `internal/server/jobs_test.go` covers absent/denied/viewer and inherited roles, all current types/statuses, safe projection/sentinel scans, strict query edges, opaque tokens, real statefs/jobrecord pages, combined type/status filtering, empty/filtered pages, mutation conflicts, unchanged bytes, restart polling, and a production-runtime recovery/authentication/read path. `internal/api/openapi.json` documents repeatable exact enum filters and the actual 200/400/401/403/404/409/503 read responses without 501.
 - **Verification:** `go test ./internal/server ./internal/api`, `go test ./...`, focused/full race tests, `go vet ./...`, `make build`, `python3 scripts/verify-contract-fixtures.py`, and `git diff --check` pass. Verification timestamp: 2026-09-01T11:05:23Z.
-- **Next:** 3.3.6b — expose authenticated HTTP cancellation and bounded SSE projection. Durable cancellation mutation core is complete; HTTP/SSE, audit, diffing, and saved plans remain future work.
+- **Next:** 3.3.6b is complete below; audit, diffing, and saved plans remain future work.
 
 #### 3.3.6a Durable cooperative cancellation mutation core — **Complete**
 
@@ -123,13 +123,16 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Verification:** `gofmt`, focused/full tests, race tests, `go vet`, `make build`, contract fixtures, and `git diff --check` pass. Verification timestamp: 2026-09-02T12:07:12Z.
 - **Worker boundary:** A durable-cancellation worker owns the narrow repository mutation and scheduler coordination only; it does not own authenticated HTTP cancellation, SSE, OpenAPI, audit, UI, service adapters, planning, or general `Put` transition policy.
 
-#### 3.3.6b Authenticated HTTP cancellation and bounded SSE projection
+#### 3.3.6b Authenticated HTTP cancellation and bounded SSE projection — **Complete**
 
 - **Scope:** Add the authenticated HTTP cancellation route and bounded authenticated SSE projection over the completed 3.3.6a core. Use the existing safe job projection, authorization/CSRF/origin rules, polling fallback, and durable event ordering; do not change durable cancellation semantics or make execution browser-dependent.
 - **Dependencies:** 3.3.6a, 3.3.4b, and 3.3.5; Phase 2 substeps 2.1–2.4 authentication/RBAC and the existing job API/projection contracts.
 - **Definition of done:** Authorized cancellation requests and denials are exposed through the versioned API, unsupported/terminal requests fail safely, SSE events are bounded and non-secret, and client disconnect does not cancel or duplicate a job.
 - **Focused verification:** Test authorized/denied cancellation, queued/running/terminal jobs, unsupported cancellation, strict route/body/CSRF/origin handling, event ordering/bounds, stream limits, client disconnect, restart, and polling after SSE loss. Sentinel-scan job responses and events.
 - **Worker boundary:** A job-event/API worker owns authenticated cancellation and SSE plumbing only; it does not modify scheduler limits, persisted record formats, state-transition policy, audit semantics, or plan execution.
+- **Evidence:** `internal/server` keeps `JobReadBackend` and the optional `JobCancellationBackend` separate, dynamically wires the production scheduler capability, applies the existing live-origin/CSRF and bearer-origin rules, and exposes exact cancel/events subroutes. Cancellation reads validated durable state before type-aware RBAC, requires a cancellation-marked canceled replay, preserves public lifecycle identity/timestamps, records actor/request metadata in `jobs.CancellationRequest`, returns only redacted versioned `JobResponse` values, and adds `jobs.cancel` to the generic in-memory/log audit hook with the job ID. SSE validates GET/query/body/Accept/Last-Event-ID before admission, shares one fixed 32-stream limiter per handler, returns safe 429 saturation with `Retry-After: 1`, polls the same durable read backend every 250ms for at most 20s/64 events, hashes exact compact `JobResponse` bytes for IDs, suppresses unchanged public projections, enforces a fixed 4096-byte serialized data bound, closes on terminal state, and never emits backend diagnostics or invokes cancellation on disconnect. Strict q values and hop-by-hop header removal are reflected in OpenAPI; focused tests cover role/status/error/framing/audit matrices, admission/release, bounds, reconnect/loss polling fallback, runtime scheduler wiring, and secret-safe projections.
+- **Verification:** Focused and full tests, race tests, vet, build/cross-build, contract fixtures, and `git diff --check` pass. Verification timestamp: 2026-09-03T11:44:39Z.
+- **Next:** 3.4.1 — define and validate safe durable audit events.
 
 ### 3.4 Implement durable audit events
 

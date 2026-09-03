@@ -82,6 +82,8 @@ func TestOpenAPICoversInitialWebFirstSurface(t *testing.T) {
 		"/api/v1/plans/{planId}/apply",
 		"/api/v1/jobs",
 		"/api/v1/jobs/{jobId}",
+		"/api/v1/jobs/{jobId}/cancel",
+		"/api/v1/jobs/{jobId}/events",
 		"/api/v1/reports",
 		"/api/v1/reports/{reportId}",
 		"/api/v1/audit",
@@ -90,6 +92,45 @@ func TestOpenAPICoversInitialWebFirstSurface(t *testing.T) {
 		if _, ok := paths[path]; !ok {
 			t.Errorf("OpenAPI path is missing: %s", path)
 		}
+	}
+}
+
+func TestOpenAPIJobEventsDocumentsSafeBoundsAndHeaders(t *testing.T) {
+	document := openAPITestDocument(t)
+	paths := objectAt(t, document, "paths")
+	events := paths["/api/v1/jobs/{jobId}/events"].(map[string]any)["get"].(map[string]any)
+	responses := events["responses"].(map[string]any)
+	limitResponse, ok := responses["429"].(map[string]any)
+	if !ok || limitResponse["$ref"] != "#/components/responses/JobEventLimit" {
+		t.Fatalf("job events 429 response=%#v", responses["429"])
+	}
+	componentResponses := objectAt(t, objectAt(t, document, "components"), "responses")
+	limit := componentResponses["JobEventLimit"].(map[string]any)
+	if limitHeaders, ok := limit["headers"].(map[string]any); !ok || limitHeaders["Retry-After"] == nil {
+		t.Fatalf("JobEventLimit headers=%#v", limit["headers"])
+	}
+	success := responses["200"].(map[string]any)
+	headers := success["headers"].(map[string]any)
+	if _, ok := headers["Connection"]; ok {
+		t.Fatal("job events documents hop-by-hop Connection header")
+	}
+	parameters := events["parameters"].([]any)
+	var accept map[string]any
+	for _, raw := range parameters {
+		parameter := raw.(map[string]any)
+		if parameter["$ref"] == "#/components/parameters/EventStreamAccept" {
+			accept = objectAt(t, objectAt(t, document, "components"), "parameters")["EventStreamAccept"].(map[string]any)
+		}
+	}
+	if accept == nil {
+		t.Fatal("job events has no EventStreamAccept parameter")
+	}
+	schema := accept["schema"].(map[string]any)
+	if schema["minLength"] != float64(17) || schema["maxLength"] != float64(64) {
+		t.Fatalf("EventStreamAccept schema bounds=%#v", schema)
+	}
+	if _, hasPattern := schema["pattern"]; hasPattern {
+		t.Fatal("EventStreamAccept uses a misleading loose pattern")
 	}
 }
 
@@ -129,7 +170,7 @@ func TestOpenAPIUnfinishedRoutesAreExplicit(t *testing.T) {
 		"GET /api/v1/targets/{targetId}/credential-status": true, "PUT /api/v1/targets/{targetId}/credentials": true, "DELETE /api/v1/targets/{targetId}/credentials": true,
 		"GET /api/v1/targets/{targetId}/readiness": true, "GET /api/v1/targets/{targetId}/version": true, "POST /api/v1/targets/{targetId}/inventory": true, "GET /api/v1/targets/{targetId}/inventory/{jobId}": true,
 		"GET /api/v1/validations": true, "POST /api/v1/validations": true, "GET /api/v1/validations/{jobId}": true,
-		"GET /api/v1/jobs": true, "GET /api/v1/jobs/{jobId}": true,
+		"GET /api/v1/jobs": true, "GET /api/v1/jobs/{jobId}": true, "POST /api/v1/jobs/{jobId}/cancel": true, "GET /api/v1/jobs/{jobId}/events": true,
 	}
 	for path, rawPathItem := range paths {
 		for method, rawOperation := range rawPathItem.(map[string]any) {

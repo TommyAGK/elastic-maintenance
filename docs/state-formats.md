@@ -1,6 +1,6 @@
 # Persisted state formats
 
-**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Later repository, scheduler, and HTTP read work does not change this state schema or version. Phase 3.2 hardened state-directory runtime integration and Phase 3.3 work through the durable cancellation mutation core (3.3.6a) are complete; see `docs/operations/state-directory.md` for the production storage contract and the Phase 3 subplan for implementation evidence. Phase 3 as a whole is **not passed**; authenticated HTTP cancellation/SSE, durable audit, planning, and later API work remain.
+**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Later repository, scheduler, and HTTP work does not change this state schema or version. Phase 3.2 hardened state-directory runtime integration and Phase 3.3 work through authenticated HTTP cancellation and bounded SSE projection (3.3.6b) are complete; see `docs/operations/state-directory.md` for the production storage contract and the Phase 3 subplan for implementation evidence. Phase 3 as a whole is **not passed**; durable audit, planning, and later API work remain.
 
 ## Contract envelope
 
@@ -83,7 +83,7 @@ Non-mutating outcomes (`unchanged`, `conflict`, `skip`, and `reject`) are observ
 
 ### `Job`
 
-Is the durable projection of `jobs.Job`. It stores actor subject/roles/auth method, request metadata, idempotency key/request digest, and safe plan/report/failure links. It contains no request body, credentials, headers, or remote response. `interrupted` is terminal. Startup recovery takes one bounded coherent jobs snapshot, validates and classifies every record before its first write, preserves terminal bytes, and CAS-interrupts queued/running records before the listener starts. It preserves an existing running `startedAt`; a queued job interrupted before execution keeps `startedAt` absent, and both receive one canonical UTC `finishedAt` plus a policy-defined safe failure code. Malformed, ambiguous, over-bound, or concurrently changed records fail closed without exposing document contents or IDs.
+Is the durable projection of `jobs.Job`. It stores actor subject/roles/auth method, request metadata, idempotency key/request digest, safe plan/report/failure links, and the internal cooperative `cancellationRequested` flag. It contains no request body, credentials, headers, or remote response. The cancellation flag is never included in the public `JobResponse` polling or SSE projection. `interrupted` is terminal. Startup recovery takes one bounded coherent jobs snapshot, validates and classifies every record before its first write, preserves terminal bytes, and CAS-interrupts queued/running records before the listener starts. It preserves an existing running `startedAt`; a queued job interrupted before execution keeps `startedAt` absent, and both receive one canonical UTC `finishedAt` plus a policy-defined safe failure code. Malformed, ambiguous, over-bound, or concurrently changed records fail closed without exposing document contents or IDs.
 
 ### `Report`
 

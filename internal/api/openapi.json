@@ -3,7 +3,7 @@
   "info": {
     "title": "Elastic Maintainer API",
     "version": "v1alpha1",
-    "description": "Initial web-first API contract. Endpoints marked with 501 responses are registered skeletons whose domain execution lands in later phases. Documented GET read operations also accept HEAD with identical status and headers and no response body."
+    "description": "Initial web-first API contract. Endpoints marked with 501 responses are registered skeletons whose domain execution lands in later phases. Documented GET read operations also accept HEAD with identical status and headers and no response body, except the bounded server-sent job event stream."
   },
   "security": [
     {
@@ -899,6 +899,118 @@
         }
       }
     },
+    "/api/v1/jobs/{jobId}/cancel": {
+      "post": {
+        "operationId": "cancelJob",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobID"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancellation accepted or replayed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "409": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{jobId}/events": {
+      "get": {
+        "operationId": "streamJobEvents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobID"
+          },
+          {
+            "$ref": "#/components/parameters/EventStreamAccept"
+          },
+          {
+            "$ref": "#/components/parameters/LastEventID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded server-sent job projection events",
+            "headers": {
+              "Cache-Control": {
+                "description": "No client or intermediary caching",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              },
+              "X-Accel-Buffering": {
+                "description": "Disable proxy buffering",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEventStream"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "401": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "403": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "404": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "406": {
+            "$ref": "#/components/responses/APIError"
+          },
+          "429": {
+            "$ref": "#/components/responses/JobEventLimit"
+          },
+          "503": {
+            "$ref": "#/components/responses/APIError"
+          }
+        }
+      }
+    },
     "/api/v1/reports": {
       "get": {
         "operationId": "listReports",
@@ -1258,6 +1370,26 @@
           "$ref": "#/components/schemas/SafeID"
         }
       },
+      "EventStreamAccept": {
+        "name": "Accept",
+        "in": "header",
+        "required": true,
+        "description": "One Accept header containing text/event-stream, optionally followed by one q parameter: q=1, q=1.0, q=1.00, q=1.000, or a positive q=0.xxx with one to three decimal digits. Lists and other parameters are rejected.",
+        "schema": {
+          "type": "string",
+          "minLength": 17,
+          "maxLength": 64
+        }
+      },
+      "LastEventID": {
+        "name": "Last-Event-ID",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
       "PlanID": {
         "name": "planId",
         "in": "path",
@@ -1404,7 +1536,7 @@
         "name": "X-CSRF-Token",
         "in": "header",
         "required": false,
-        "description": "Required for browser cookie mutations including logout, validation, live inventory, and credential changes; omit for bearer automation where supported.",
+        "description": "Required for browser cookie mutations including logout, validation, live inventory, credential changes, and job cancellation; omit for bearer automation where supported.",
         "schema": {
           "type": "string",
           "minLength": 32,
@@ -1459,6 +1591,27 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/JobAcceptedResponse"
+            }
+          }
+        }
+      },
+      "JobEventLimit": {
+        "description": "Too many concurrent job event streams",
+        "headers": {
+          "Retry-After": {
+            "description": "Retry after one second",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
             }
           }
         }
@@ -1989,6 +2142,10 @@
             "type": "string"
           }
         }
+      },
+      "JobEventStream": {
+        "type": "string",
+        "description": "UTF-8 SSE framing with event: job, one compact data line, and a SHA-256 event ID. The data is the redacted JobResponse projection and is limited to 4096 serialized bytes per event."
       },
       "JobResponse": {
         "type": "object",
