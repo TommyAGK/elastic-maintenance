@@ -1,6 +1,6 @@
 # Persisted state formats
 
-**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Later repository, scheduler, and HTTP work does not change this state schema or version. Phase 3.2 hardened state-directory runtime integration and Phase 3.3 work through authenticated HTTP cancellation and bounded SSE projection (3.3.6b) are complete; see `docs/operations/state-directory.md` for the production storage contract and the Phase 3 subplan for implementation evidence. Phase 3 as a whole is **not passed**; durable audit, planning, and later API work remain.
+**Phase 3.1 status: complete.** These are directory-neutral, non-secret JSON contracts only. Later repository, scheduler, and HTTP work does not change this state schema or version. Phase 3.2 hardened state-directory runtime integration, Phase 3.3 work through authenticated HTTP cancellation and bounded SSE projection (3.3.6b), and Phase 3.4.1 safe durable audit-event schema validation are complete; see `docs/operations/state-directory.md` for the production storage contract and the Phase 3 subplan for implementation evidence. Phase 3 as a whole is **not passed**; audit redaction, audit storage/recovery/reads, planning, and later API work remain.
 
 ## Contract envelope
 
@@ -97,7 +97,9 @@ Binds an idempotency key to an actor, a bounded namespaced action, and a request
 
 ### `AuditEvent`
 
-Stores the safe audit projection: event ID/time, request/action/outcome, optional target/plan/job IDs, bounded reason code, and an optional actor containing only subject, roles, and authentication method. Persisted actions use a bounded namespaced action pattern rather than a finite registry, so adding an action does not require changing this state schema.
+Stores the safe audit projection: caller-supplied event ID, canonical UTC occurrence time, request/action/outcome, optional target/plan/job IDs, bounded reason code, and an optional actor containing only subject, sorted unique known roles, and authentication method. Successful events require an actor; denied and failed events may be anonymous. IDs and request/reason values use the v1 bounded safe-code grammar (up to 128 ASCII bytes). Persisted actions use a bounded namespaced action pattern (`[a-z][a-z0-9_-]*([.][a-z][a-z0-9_-]*)+`, up to 128 bytes) rather than a finite registry, so adding an action does not require changing this state schema.
+
+`state.NewAuditEvent` is the narrow transient-to-durable projection boundary. It supplies the version/kind, canonicalizes the timestamp to UTC, normalizes the auth actor, drops display/session/CSRF/token-bearing auth fields, requires newly projected job references to use the current durable job ID grammar (`[A-Za-z0-9_-]{1,64}`), copies only the safe event metadata, and validates before returning. It does not generate IDs, redact arbitrary input, persist, rotate, recover, or expose HTTP. Empty optional values and anonymous actors are omitted on canonical encoding. For v1 compatibility, decoding continues to treat explicit JSON `null` optionals as absent and accepts legacy job references using the wider safe-code grammar; tightening those reads requires an explicit complete state-set migration. `EncodeAuditEvent` and `DecodeAuditEvent` use the common strict bounded codec (including exact keys and duplicate/trailing/unknown-field rejection).
 
 ## Strict codecs and non-secret boundary
 

@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, Phase 3.3.4b, Phase 3.3.5, Phase 3.3.6a, and Phase 3.3.6b complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, scheduler runtime lifecycle integration, authenticated durable job read/polling projections, durable cooperative cancellation, authenticated HTTP cancellation, and bounded SSE job projections are implemented. Durable audit, planning, and later API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, Phase 3.3.4b, Phase 3.3.5, Phase 3.3.6a, Phase 3.3.6b, and Phase 3.4.1 complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, scheduler runtime lifecycle integration, authenticated durable job read/polling projections, durable cooperative cancellation, authenticated HTTP cancellation, bounded SSE job projections, and safe durable audit-event schema validation are implemented. Audit redaction/storage/recovery/reads, planning, and later API work remain.
 
 ## Objective
 
@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.6b is complete; 3.4.1 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.6b and 3.4.1 are complete; 3.4.2 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -132,17 +132,19 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Worker boundary:** A job-event/API worker owns authenticated cancellation and SSE plumbing only; it does not modify scheduler limits, persisted record formats, state-transition policy, audit semantics, or plan execution.
 - **Evidence:** `internal/server` keeps `JobReadBackend` and the optional `JobCancellationBackend` separate, dynamically wires the production scheduler capability, applies the existing live-origin/CSRF and bearer-origin rules, and exposes exact cancel/events subroutes. Cancellation reads validated durable state before type-aware RBAC, requires a cancellation-marked canceled replay, preserves public lifecycle identity/timestamps, records actor/request metadata in `jobs.CancellationRequest`, returns only redacted versioned `JobResponse` values, and adds `jobs.cancel` to the generic in-memory/log audit hook with the job ID. SSE validates GET/query/body/Accept/Last-Event-ID before admission, shares one fixed 32-stream limiter per handler, returns safe 429 saturation with `Retry-After: 1`, polls the same durable read backend every 250ms for at most 20s/64 events, hashes exact compact `JobResponse` bytes for IDs, suppresses unchanged public projections, enforces a fixed 4096-byte serialized data bound, closes on terminal state, and never emits backend diagnostics or invokes cancellation on disconnect. Strict q values and hop-by-hop header removal are reflected in OpenAPI; focused tests cover role/status/error/framing/audit matrices, admission/release, bounds, reconnect/loss polling fallback, runtime scheduler wiring, and secret-safe projections.
 - **Verification:** Focused and full tests, race tests, vet, build/cross-build, contract fixtures, and `git diff --check` pass. Verification timestamp: 2026-09-03T11:44:39Z.
-- **Next:** 3.4.1 — define and validate safe durable audit events.
+- **Next:** 3.4.2 — redact before audit persistence.
 
 ### 3.4 Implement durable audit events
 
-#### 3.4.1 Define and validate safe audit events
+#### 3.4.1 Define and validate safe audit events — **Complete**
 
 - **Scope:** Implement the durable event shape and validation for actor subject/roles, request ID, job ID, action, target ID, plan ID, outcome, timestamp, and bounded safe reason code. Keep actions within the bounded namespaced pattern required by the architecture, and hand validated events to the storage worker.
 - **Dependencies:** 3.1 and 3.2; Phase 2 substep 2.4 actor and audit-hook contracts.
 - **Definition of done:** Valid events are strictly encoded as non-secret versioned records, required identifiers are preserved, optional identifiers are explicit, and invalid/unbounded events are rejected before the append layer.
-- **Focused verification:** Test required/optional field validation, bounded action/reason/identifier values, deterministic serialization, duplicate/invalid event rejection, and reopen/read of validated fixtures.
-- **Worker boundary:** An audit-schema worker owns event types and validation in `internal/state`; it does not own redaction policy, file append/rotation, HTTP reads, or caller-specific hooks.
+- **Focused verification:** `internal/state/audit_test.go` covers actor projection and nil/success rules, all current roles/methods/outcomes/actions plus a future namespaced action, normalization, bounds, UTC conversion, exact JSON shape, strict malformed input, optional omission, legacy-null/job-reference compatibility, round-trip/reopen-style decoding, document bounds, and sentinel-safe errors.
+- **Evidence:** `state.NewAuditEvent` is the narrow caller-supplied-ID projection boundary. It uses `ActorFromAuth`, retains only subject/roles/authentication method, canonicalizes occurrence time to UTC, accepts only bounded safe metadata, validates the durable action grammar independently of the transient finite action registry, requires newly projected job references to use the current `[A-Za-z0-9_-]{1,64}` job ID grammar, and returns `ErrInvalidAuditEvent` without caller-controlled diagnostics. `AuditEvent.Validate`, `EncodeAuditEvent`, and `DecodeAuditEvent` retain strict v1 validation/codec authority, including read compatibility for explicit-null optionals and legacy wider safe-code job references. No persistence, redaction, rotation, recovery, HTTP, or state layout/version change was added.
+- **Worker boundary:** An audit-schema worker owns event types, projection, and validation in `internal/state`; it does not own redaction policy, file append/rotation, HTTP reads, or caller-specific hooks.
+- **Verification:** Focused/full tests, race tests, vet, build/cross-build, contract fixtures, and `git diff --check` pass. Verification timestamp: 2026-09-03T12:58:29Z.
 
 #### 3.4.2 Redact before audit persistence
 

@@ -14,6 +14,9 @@ var (
 	ErrDuplicateField     = errors.New("state document contains a duplicate JSON field")
 	ErrDocumentTooLarge   = errors.New("state document exceeds the size limit")
 	ErrMigrationRequired  = errors.New("state document requires explicit migration")
+	// ErrInvalidAuditEvent is the safe constructor boundary error. It deliberately
+	// does not include any caller-controlled field or validation diagnostic.
+	ErrInvalidAuditEvent = errors.New("invalid audit event")
 )
 
 const (
