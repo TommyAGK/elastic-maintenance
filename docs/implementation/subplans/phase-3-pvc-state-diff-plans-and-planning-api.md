@@ -1,6 +1,6 @@
 # Phase 3 — PVC state, diff, plans, and planning API
 
-**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, Phase 3.3.4b, Phase 3.3.5, Phase 3.3.6a, Phase 3.3.6b, and Phase 3.4.1 complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, scheduler runtime lifecycle integration, authenticated durable job read/polling projections, durable cooperative cancellation, authenticated HTTP cancellation, bounded SSE job projections, and safe durable audit-event schema validation are implemented. Audit redaction/storage/recovery/reads, planning, and later API work remain.
+**Status: Phase 3.1, Phase 3.2, Phase 3.3.1, Phase 3.3.2a, Phase 3.3.2b, Phase 3.3.3, Phase 3.3.4a, Phase 3.3.4b, Phase 3.3.5, Phase 3.3.6a, Phase 3.3.6b, and Phase 3.4.1 complete; Phase 3 not passed.** Versioned non-secret schemas/codecs, hardened state-directory primitives/runtime integration, the durable job-record repository, fail-closed job recovery policy/transition, bounded startup job recovery, durable scoped idempotency persistence, the standalone durable scheduler core, scheduler runtime lifecycle integration, authenticated durable job read/polling projections, durable cooperative cancellation, authenticated HTTP cancellation, bounded SSE job projections, and safe durable audit-event schema validation are implemented. The immutable safe audit envelope, segment persistence, audit recovery, durable recorder/runtime mutation integration, authorized audit reads, planning, and later API work remain.
 
 ## Objective
 
@@ -132,7 +132,7 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Worker boundary:** A job-event/API worker owns authenticated cancellation and SSE plumbing only; it does not modify scheduler limits, persisted record formats, state-transition policy, audit semantics, or plan execution.
 - **Evidence:** `internal/server` keeps `JobReadBackend` and the optional `JobCancellationBackend` separate, dynamically wires the production scheduler capability, applies the existing live-origin/CSRF and bearer-origin rules, and exposes exact cancel/events subroutes. Cancellation reads validated durable state before type-aware RBAC, requires a cancellation-marked canceled replay, preserves public lifecycle identity/timestamps, records actor/request metadata in `jobs.CancellationRequest`, returns only redacted versioned `JobResponse` values, and adds `jobs.cancel` to the generic in-memory/log audit hook with the job ID. SSE validates GET/query/body/Accept/Last-Event-ID before admission, shares one fixed 32-stream limiter per handler, returns safe 429 saturation with `Retry-After: 1`, polls the same durable read backend every 250ms for at most 20s/64 events, hashes exact compact `JobResponse` bytes for IDs, suppresses unchanged public projections, enforces a fixed 4096-byte serialized data bound, closes on terminal state, and never emits backend diagnostics or invokes cancellation on disconnect. Strict q values and hop-by-hop header removal are reflected in OpenAPI; focused tests cover role/status/error/framing/audit matrices, admission/release, bounds, reconnect/loss polling fallback, runtime scheduler wiring, and secret-safe projections.
 - **Verification:** Focused and full tests, race tests, vet, build/cross-build, contract fixtures, and `git diff --check` pass. Verification timestamp: 2026-09-03T11:44:39Z.
-- **Next:** 3.4.2 — redact before audit persistence.
+- **Next:** 3.4.2 — build the immutable safe pre-storage audit envelope; no durable sink or runtime call-site coverage is claimed until 3.4.5.
 
 ### 3.4 Implement durable audit events
 
@@ -146,45 +146,48 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Worker boundary:** An audit-schema worker owns event types, projection, and validation in `internal/state`; it does not own redaction policy, file append/rotation, HTTP reads, or caller-specific hooks.
 - **Verification:** Focused/full tests, race tests, vet, build/cross-build, contract fixtures, and `git diff --check` pass. Verification timestamp: 2026-09-03T12:58:29Z.
 
-#### 3.4.2 Redact before audit persistence
+#### 3.4.2 Build the immutable safe pre-storage audit envelope
 
-- **Scope:** Apply the shared safe serialization/redaction boundary before any audit event reaches the PVC writer. Retain only metadata and safe reason codes; never persist tokens, API keys, certificates, Secret values, or sensitive request bodies.
-- **Dependencies:** 3.4.1; Phase 2 substeps 2.4, 2.6, and 2.7 redaction and safe-error contracts.
-- **Definition of done:** All audit call sites pass through the redaction boundary, redacted events still satisfy the event schema, and unsafe input is rejected or reduced without leaking it in errors.
-- **Focused verification:** Inject each prohibited credential and sensitive body type at the audit boundary, inspect stored bytes/errors/log hooks, and verify safe metadata remains available for authorized review.
-- **Worker boundary:** A redaction worker owns the audit serialization boundary and sentinel tests; it does not change event storage layout, authorization, or business outcomes.
+- **Scope:** Add an immutable envelope whose constructor accepts a caller-supplied event ID and `audit.Event`, calls `state.NewAuditEvent`, and then calls `state.EncodeAuditEvent`. Store defensive copies of the canonical bytes and expose no mutable event representation.
+- **Trusted metadata contract:** Callers may provide only normalized actor metadata, known roles/authentication method, server-issued request IDs, bounded target/plan/job IDs, bounded namespaced actions, outcomes, and producer-owned reason codes. Request bodies, headers, cookies, tokens, API keys, CA material, Secret contents, and arbitrary diagnostics are never audit fields. Redaction is structural allowlisting, not substring scanning or heuristic masking.
+- **Dependencies:** 3.4.1 and the strict state codec.
+- **Definition of done:** The envelope can only be created through the safe projection, contains canonical `AuditEvent` bytes, returns defensive byte copies, and exposes only safe sentinel errors. No ID generation, persistence, statefs, context, sink, recorder, runtime, or HTTP path is added; no transient-call-site coverage is claimed.
+- **Focused verification:** Cover allowlist projection, canonical exact bytes, defensive-copy behavior, invalid metadata, prohibited transient fields, round-trip decoding, bounds, and sentinel-safe errors. Prove the package has no statefs, runtime, HTTP, or sink dependency.
+- **Worker boundary:** An envelope worker owns the immutable envelope and its tests only; it does not wire transient call sites or define storage.
 
-#### 3.4.3 Append and rotate audit segments atomically
+#### 3.4.3 Implement the segment repository over safe envelopes
 
-- **Scope:** Implement append-oriented audit files with bounded segment/rotation behavior using the completed atomic write and fsync primitives. Rotation must preserve required evidence and must not expose partial records to readers.
-- **Dependencies:** 3.2, 3.4.1, and 3.4.2.
-- **Definition of done:** Appends, segment naming/order, size bounds, and rotation are deterministic and safe for the single-writer model; a completed event is either readable in one segment or not acknowledged as persisted.
-- **Focused verification:** Append across rotation thresholds, inject write/fsync/rename failures, reopen segments, and verify no truncated acknowledged event or accidental deletion of required evidence.
-- **Worker boundary:** A segment-storage worker owns audit file layout, append, fsync, and rotation; it does not own redaction rules, pagination, or audit authorization.
+- **Scope:** Implement the bounded audit segment repository under the fixed `statefs.AuditDir`. Its append API accepts only the safe envelope, never `audit.Event`, `state.AuditEvent`, or arbitrary bytes. Preserve canonical event bytes inside documented bounded framing with deterministic segment naming, ordering, rotation, ownership, locking, fsync, and failure categories.
+- **Dependencies:** 3.2 and 3.4.2.
+- **Definition of done:** Every durable append path is typed to receive only a safe envelope; partial or durability-unknown writes are never acknowledged as completed, and no state kind/version changes silently.
+- **Focused verification:** Cover first/repeated append, deterministic rotation, bounds, concurrent writers, injected write/fsync/rename/free-space/lock failures, reopen behavior, canonical-byte preservation, malformed envelope rejection, and safe errors.
+- **Worker boundary:** A segment-storage worker owns audit storage and any narrowly required statefs primitive; it does not own redaction, ID generation, runtime startup, recorder integration, authorization, or HTTP reads.
 
-#### 3.4.4 Recover audit state after restart and partial writes
+#### 3.4.4 Recover audit segments after restart and partial writes
 
-- **Scope:** Reopen audit segments after clean and interrupted shutdown, discard or quarantine only incomplete trailing data according to the state contract, and keep valid prior events available.
+- **Scope:** Add bounded segment recovery that validates framing and every event with the strict state decoder, preserves valid prior events, and resumes append safely after clean or interrupted shutdown. Only an incomplete trailing frame may be handled according to the documented contract; non-trailing corruption and unsafe structure fail closed.
 - **Dependencies:** 3.4.3.
-- **Definition of done:** Restart recovery is deterministic and fail-closed for malformed non-trailing corruption, while valid events before an interrupted append remain readable and audit persistence resumes safely.
-- **Focused verification:** Use fixtures for torn final records, interrupted rotation, invalid headers, missing segments, and clean restart. Verify event ordering, no invented events, and no secret bytes in recovery errors.
-- **Worker boundary:** An audit-recovery worker owns segment scanning and recovery diagnostics; it does not own event creation, redaction, or API pagination.
+- **Definition of done:** Recovery is deterministic, bounded, fail-closed for non-trailing corruption, preserves valid preceding events, invents no events, and performs no listener/runtime integration.
+- **Focused verification:** Cover torn final records, interrupted rotation, invalid framing, missing/duplicate segments, non-trailing corruption, oversized scans, clean restart, reruns, ordering, no invented events, and secret-free diagnostics.
+- **Worker boundary:** An audit-recovery worker owns segment scanning and recovery classification only; it does not own event creation, redaction, recorder behavior, startup wiring, or pagination.
 
-#### 3.4.5 Provide authorized paginated audit reads
+#### 3.4.5 Integrate the durable recorder and runtime mutation acknowledgement
 
-- **Scope:** Expose the durable audit read projection with the existing role/policy checks, stable ordering, and bounded page size already defined by the API surface.
-- **Dependencies:** 3.4.3 and 3.4.4; Phase 2 substep 2.4 RBAC and Phase 1 substep 1.8 API pagination contracts.
-- **Definition of done:** Authorized viewers can read complete pages of safe events, unauthorized or out-of-bound requests fail safely, and pagination does not mutate or rewrite audit files.
-- **Focused verification:** Test every permitted/denied role, first/middle/last/empty pages, invalid cursors or bounds, rotation-spanning reads, and response sentinel scans.
-- **Worker boundary:** An audit-read worker owns the read service/handler and pagination adapter; it does not write segments or alter audit policy.
+- **Scope:** Implement `audit.Recorder` over the recovered repository. Generate durable IDs here, construct the safe envelope, and append using a service-lifetime context with one fixed timeout rather than the HTTP request context. Recover audit state before listeners/services, stop new work before bounded recorder shutdown, and close state only after audit work completes.
+- **Acknowledgement contract:** No successful mutation, accepted job/cancellation, credential mutation, logout completion, or successful session issuance may be acknowledged before its durable audit append succeeds. On append failure or durability-unknown outcome, return a fixed audit-unavailable/indeterminate response; do not claim success or attempt rollback. Existing idempotency and polling remain authoritative for already-performed side effects.
+- **Call-site contract:** Replace the production `LogRecorder` path, establish one authoritative event owner per operation, and include credential operations using metadata only. Every runtime persistence path passes through the safe envelope; client disconnect must not silently cancel the append.
+- **Dependencies:** 3.4.2, 3.4.3, and 3.4.4; Phase 3.2 runtime lifecycle; Phase 2 audit/credential contracts; existing mutation contracts.
+- **Definition of done:** Production uses the durable recorder, recovery precedes listening, persistence uses bounded service-owned contexts, mutation success waits for durable audit success, and each operation emits exactly one safe event.
+- **Focused verification:** Cover ID generation, canonical persistence, request cancellation/disconnect, service timeout, durability-unknown errors, shutdown ordering, recovery-before-listener, withheld success on audit failure, indeterminate side effects, credential sentinel scans, and exactly-once event ownership.
+- **Worker boundary:** A durable-audit integration worker owns recorder/runtime lifecycle wiring and response coordination; it does not redesign schemas, segments, redaction, RBAC, or business outcomes.
 
-#### 3.4.6 Audit credential metadata operations safely
+#### 3.4.6 Provide authorized paginated audit reads
 
-- **Scope:** Connect credential metadata operations to the bounded namespaced audit-action pattern, retaining only Secret namespace/name, resource version, rotation metadata, actor, and other explicitly non-secret metadata.
-- **Dependencies:** 3.4.1 and 3.4.2; Phase 2 substep 2.6 credential metadata hooks.
-- **Definition of done:** Upload/rotation/deletion events are distinguishable by bounded actions and contain no credential values, certificate bodies, tokens, or request digests where prohibited by the state schema.
-- **Focused verification:** Exercise each credential metadata action, inspect persisted events and safe errors, and run repository sentinel scans over audit fixtures.
-- **Worker boundary:** An audit-integration worker owns credential-operation event call-site mapping only; it does not own Kubernetes Secret operations, plan/job lifecycle audit events, or the generic audit store.
+- **Scope:** Expose `GET /api/v1/audit` and permitted `HEAD` behavior over a read-only safe projection with existing audit-read policy, stable cross-segment ordering, bounded filters, and opaque pagination tokens.
+- **Dependencies:** 3.4.4 and 3.4.5; Phase 2 RBAC and Phase 1 pagination contracts.
+- **Definition of done:** Authorized viewers receive complete safe events; unauthorized, malformed, corrupt, unavailable, or out-of-bound requests fail safely. Reads never append, rotate, repair, delete, or rewrite segments.
+- **Focused verification:** Test every role, empty/first/middle/last and rotation-spanning pages, invalid cursors/bounds, restart reads, corruption/unavailability, stable ordering, and response sentinel scans.
+- **Worker boundary:** An audit-read worker owns the read service, handler, projection, and pagination adapter only; it does not write/recover segments, alter redaction, or change authorization.
 
 ### 3.5 Implement inventory and journal recovery
 
