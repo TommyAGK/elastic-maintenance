@@ -37,7 +37,7 @@ Implement single-writer non-secret PVC state, durable jobs/audit/inventory, owne
 
 The deployment contract is documented in `docs/operations/state-directory.md`. Integration coverage lives in the `internal/server` package; filesystem primitive tests remain in `internal/statefs`.
 
-**Planning status:** 3.3.6b, 3.4.1, and 3.4.2 are complete; 3.4.3 through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
+**Planning status:** 3.3.6b, 3.4.1, and 3.4.2 are complete; 3.4.3a through 3.10 remain future work. Each increment is intended to be one independently reviewable and verifiable unit. Dependencies below are completion dependencies; increments without a listed dependency may proceed in parallel, provided their workers do not share write ownership.
 
 **Living-plan rule:** When implementation discoveries change an assumption, update the scope, dependencies, definition of done, focused verification, and worker boundary of the affected *remaining* increments before starting them. Preserve completed status and safety requirements, and do not mark a future increment complete without its evidence.
 
@@ -157,20 +157,29 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Worker boundary:** An envelope worker owns the immutable envelope and its tests only; it does not wire transient call sites or define storage.
 - **Evidence:** `internal/auditenvelope` exposes only `Envelope`, `New`, `Bytes`, `Validate`, and the fixed `ErrInvalidEnvelope` sentinel. `Envelope` stores only unexported canonical bytes; `New` calls `state.NewAuditEvent` followed by `state.EncodeAuditEvent` and defensively copies the result; `Validate` strictly decodes and canonically re-encodes before accepting it. Tests cover exact full/minimal bytes and state round trips, structural allowlisting and excluded transient fields, defensive copies, zero/non-canonical/oversized values, all current actions/outcomes plus a future namespaced action, anonymous denied/failed events, unsafe inputs, and sentinel safety. The package imports only `internal/audit`, `internal/state`, and the standard library. No state schema, persistence, statefs, sink, recorder, runtime, HTTP, or call-site behavior changed.
 - **Verification:** `gofmt`, `go test ./internal/auditenvelope`, `go test -race ./internal/auditenvelope`, `go test ./...`, `go vet ./...`, `make build`, cross-build, contract fixtures, and `git diff --check` pass. Verification timestamp: 2026-09-04T10:54:12Z.
-- **Next:** 3.4.3 — implement the segment repository over safe envelopes.
+- **Next:** 3.4.3a — define the bounded audit segment framing.
 
-#### 3.4.3 Implement the segment repository over safe envelopes
+#### 3.4.3a Define the bounded audit segment framing
 
-- **Scope:** Implement the bounded audit segment repository under the fixed `statefs.AuditDir`. Its append API accepts only the safe envelope, never `audit.Event`, `state.AuditEvent`, or arbitrary bytes. Preserve canonical event bytes inside documented bounded framing with deterministic segment naming, ordering, rotation, ownership, locking, fsync, and failure categories.
-- **Dependencies:** 3.2 and 3.4.2.
-- **Definition of done:** Every durable append path is typed to receive only a safe envelope; partial or durability-unknown writes are never acknowledged as completed, and no state kind/version changes silently.
-- **Focused verification:** Cover first/repeated append, deterministic rotation, bounds, concurrent writers, injected write/fsync/rename/free-space/lock failures, reopen behavior, canonical-byte preservation, malformed envelope rejection, and safe errors.
-- **Worker boundary:** A segment-storage worker owns audit storage and any narrowly required statefs primitive; it does not own redaction, ID generation, runtime startup, recorder integration, authorization, or HTTP reads.
+- **Scope:** Define a versioned deterministic binary segment codec around canonical safe-envelope payloads. The header binds a fixed magic/version, exact segment sequence, and bounded record count; each frame binds a bounded payload length and SHA-256 checksum to exact canonical `AuditEvent` bytes. Segment files are storage framing, not a new state-document kind.
+- **Dependencies:** 3.4.2 and the strict state codec.
+- **Definition of done:** New/append/decode operations preserve exact canonical envelope bytes, reject zero or out-of-range sequences, duplicate event IDs, malformed/trailing/non-canonical/checksum-invalid frames, count/size overflow, and impossible append bounds using fixed safe errors. The codec is filesystem- and context-free.
+- **Focused verification:** Cover exact golden bytes, empty/one/many records, deterministic encoding, envelope preservation, every header/frame corruption, checksum mismatch, truncation at every byte boundary, duplicate IDs, count/length/aggregate limits, non-canonical payloads, append-full behavior, and input/output defensive copies.
+- **Worker boundary:** A segment-codec worker owns only the pure framing package and format documentation; it does not own statefs, filenames, repository concurrency, rotation, recovery policy, ID generation, runtime, or HTTP.
+
+#### 3.4.3b Persist and rotate audit segments atomically
+
+- **Scope:** Implement the bounded audit segment repository under fixed `statefs.AuditDir`. Its append API accepts only a safe envelope, never `audit.Event`, `state.AuditEvent`, or arbitrary bytes. Rewrite the active bounded segment atomically with existing statefs fsync/rename primitives; rotate to deterministic sequence filenames before an append would exceed segment limits.
+- **Replay contract:** Event IDs are unique across segments. An exact ID-and-envelope retry returns the existing durable reference without another append; the same ID with different bytes fails as a conflict. Sequence exhaustion, unexpected entries, or ambiguous mutation fail closed.
+- **Dependencies:** 3.2 and 3.4.3a.
+- **Definition of done:** Every durable append path is typed to receive only a safe envelope; naming/order/rotation and repository serialization are deterministic; partial or durability-unknown writes are never acknowledged as completed; no new state kind/version is introduced.
+- **Focused verification:** Cover first/repeated append, exact replay/conflict, deterministic rotation, sequence exhaustion, bounds, concurrent writers, injected write/fsync/rename/free-space/lock failures, clean reopen, canonical-byte preservation, malformed envelope rejection, and safe errors.
+- **Worker boundary:** A segment-storage worker owns repository layout/rotation and any narrowly required statefs primitive; it does not own framing, redaction, ID generation, runtime startup, recorder integration, corruption recovery, authorization, or HTTP reads.
 
 #### 3.4.4 Recover audit segments after restart and partial writes
 
 - **Scope:** Add bounded segment recovery that validates framing and every event with the strict state decoder, preserves valid prior events, and resumes append safely after clean or interrupted shutdown. Only an incomplete trailing frame may be handled according to the documented contract; non-trailing corruption and unsafe structure fail closed.
-- **Dependencies:** 3.4.3.
+- **Dependencies:** 3.4.3b.
 - **Definition of done:** Recovery is deterministic, bounded, fail-closed for non-trailing corruption, preserves valid preceding events, invents no events, and performs no listener/runtime integration.
 - **Focused verification:** Cover torn final records, interrupted rotation, invalid framing, missing/duplicate segments, non-trailing corruption, oversized scans, clean restart, reruns, ordering, no invented events, and secret-free diagnostics.
 - **Worker boundary:** An audit-recovery worker owns segment scanning and recovery classification only; it does not own event creation, redaction, recorder behavior, startup wiring, or pagination.
@@ -180,7 +189,7 @@ The deployment contract is documented in `docs/operations/state-directory.md`. I
 - **Scope:** Implement `audit.Recorder` over the recovered repository. Generate durable IDs here, construct the safe envelope, and append using a service-lifetime context with one fixed timeout rather than the HTTP request context. Recover audit state before listeners/services, stop new work before bounded recorder shutdown, and close state only after audit work completes.
 - **Acknowledgement contract:** No successful mutation, accepted job/cancellation, credential mutation, logout completion, or successful session issuance may be acknowledged before its durable audit append succeeds. On append failure or durability-unknown outcome, return a fixed audit-unavailable/indeterminate response; do not claim success or attempt rollback. Existing idempotency and polling remain authoritative for already-performed side effects.
 - **Call-site contract:** Replace the production `LogRecorder` path, establish one authoritative event owner per operation, and include credential operations using metadata only. Every runtime persistence path passes through the safe envelope; client disconnect must not silently cancel the append.
-- **Dependencies:** 3.4.2, 3.4.3, and 3.4.4; Phase 3.2 runtime lifecycle; Phase 2 audit/credential contracts; existing mutation contracts.
+- **Dependencies:** 3.4.2, 3.4.3b, and 3.4.4; Phase 3.2 runtime lifecycle; Phase 2 audit/credential contracts; existing mutation contracts.
 - **Definition of done:** Production uses the durable recorder, recovery precedes listening, persistence uses bounded service-owned contexts, mutation success waits for durable audit success, and each operation emits exactly one safe event.
 - **Focused verification:** Cover ID generation, canonical persistence, request cancellation/disconnect, service timeout, durability-unknown errors, shutdown ordering, recovery-before-listener, withheld success on audit failure, indeterminate side effects, credential sentinel scans, and exactly-once event ownership.
 - **Worker boundary:** A durable-audit integration worker owns recorder/runtime lifecycle wiring and response coordination; it does not redesign schemas, segments, redaction, RBAC, or business outcomes.
